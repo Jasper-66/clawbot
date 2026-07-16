@@ -1,4 +1,4 @@
-package com.example.mission;
+package com.example.mission.common;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.CommandLineRunner;
