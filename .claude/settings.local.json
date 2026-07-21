@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(mvn clean *)"
+      "Bash(mvn clean *)",
+      "Bash(cd /tmp)",
+      "Bash(javap -classpath \"E:\\\\MAVEN\\\\apache-maven-3.9.11\\\\mvn\\\\io\\\\github\\\\lith0924\\\\wechat-ilink-sdk\\\\2.1.0\\\\wechat-ilink-sdk-2.1.0.jar\" -public com.github.wechat.ilink.sdk.ILinkClientBuilder)"
     ]
   }
 }
