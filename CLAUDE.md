@@ -18,7 +18,7 @@ mvn clean package
 mvn spring-boot:run
 ```
 
-## Environment Notes
+## Environment
 
 - **JDK**: JDK 17 (Microsoft OpenJDK `ms-17.0.19`). Use `JAVA_HOME=C:/Users/30287/.jdks/ms-17.0.19` for CLI builds.
 - **Maven**: 3.9.11
@@ -26,32 +26,52 @@ mvn spring-boot:run
 
 ## Architecture
 
-Standard Spring Boot 3.x project structure:
+ClawBot is a WeChat bot that integrates LLM chat, image recognition, TTS/ASR, image generation, weather queries, and file summarization. The entry point is `MissionApplication.java` in package `com.example.clawbot`.
+
+### Message flow
 
 ```
-src/main/java/com/example/mission/
-├── MissionApplication.java          # Entry point
-├── common/
-│   ├── Result.java                  # Unified API response wrapper (code, message, data)
-│   ├── BusinessException.java       # Custom runtime exception with business error code
-│   ├── GlobalExceptionHandler.java  # @RestControllerAdvice: handles BusinessException, validation errors, and generic exceptions
-│   └── StartupRunner.java           # Logs startup completion via CommandLineRunner
-├── config/
-│   ├── AppConfig.java               # Empty configuration class (placeholder)
-│   └── RestTemplateConfig.java      # RestTemplate bean with Authorization header interceptor
-└── controller/
-    └── MyController.java            # GET /call-api?city=xxx — proxies weather API from seniverse.com
+WeChatBotService (polling loop, message router)
+  ├── text → weather? → WeatherService
+  ├── text → image gen? → ImageGenerationService
+  ├── text → TTS request? → SpeechService.textToSpeech()
+  ├── text → other → LlmService.chat()
+  ├── image → LlmService.chatWithImage() (vision API)
+  ├── voice → SpeechService.speechToText() → route as text
+  └── file → FileSummaryService (extract text with PDFBox/POI → LLM summary)
 ```
 
-### Key Patterns
+`WeChatBotService` uses `wechat-ilink-sdk` (ILinkClient) for WeChat connectivity. It logs in via QR code, then polls for messages every 2 seconds. Message deduplication uses a `ConcurrentHashMap.newKeySet()` of message IDs.
 
-- **API Response**: All responses go through `Result<T>` wrapper. The `GlobalExceptionHandler` provides three tiers: business exceptions (400), validation errors (400), and unknown errors (500).
-- **Bean collision note**: `RestTemplateConfig` defines the `restTemplate` bean (with interceptor). `AppConfig` is an empty config class — do not add a duplicate `restTemplate` bean.
-- **External API**: `MyController` calls seniverse.com weather API. The API key is hardcoded in the controller (`SLiqyqp-myXKw1e2J`).
+### Services
+
+| Service | Responsibility | External API |
+|---|---|---|
+| `WeChatBotService` | WeChat login, polling loop, message routing, reply sending | wechat-ilink-sdk |
+| `LlmService` | Text chat with conversation history (per-user, max 10 turns), image recognition via vision model | DeepSeek (chat), DashScope (vision) |
+| `SpeechService` | TTS (text→WAV), ASR (voice→text), SILK→PCM→WAV decoding, per-user voice preference | DashScope TTS (qwen3-tts-flash), DashScope ASR (qwen3-asr-flash) |
+| `WeatherService` | Current weather for a city | 心知天气 (seniverse.com) |
+| `ImageGenerationService` | Text→image, handles OpenAI/DashScope response formats | 智谱 CogView-3-Plus |
+| `FileSummaryService` | Extract text from PDF/DOCX/XLSX/PPTX/TXT → LLM summary | Apache PDFBox + POI, DeepSeek |
+
+### Exception handling
+
+`exception/` package contains:
+- `Result<T>` — unified response wrapper with static `error()` factory
+- `BusinessException` — runtime exception carrying a business error code
+- `GlobalExceptionHandler` — `@RestControllerAdvice` catching `BusinessException` (warn), `MethodArgumentNotValidException` (400), and generic `Exception` (500)
+
+### Configuration
+
+- `RestTemplateConfig` provides a plain `RestTemplate` bean (no interceptors — auth is set per-request in each service)
+- `application.properties` is gitignored; `application-example.properties` serves as the template with placeholder values for all API keys
 
 ## Dependencies
 
-- spring-boot-starter-web (Spring MVC + embedded Tomcat)
-- spring-boot-starter-data-mongodb (MongoDB driver, requires a running MongoDB instance for full context)
-- mysql-connector-j (MySQL driver, runtime scope)
-- lombok (annotation processing)
+- **spring-boot-starter-web** — Spring MVC + Tomcat
+- **spring-boot-starter-data-mongodb** — MongoDB driver
+- **mysql-connector-j** — MySQL driver (runtime scope)
+- **wechat-ilink-sdk** — WeChat ILink bot SDK
+- **pdfbox 3.0.4** — PDF text extraction
+- **poi-ooxml 5.2.5** — Word/Excel/PPT text extraction
+- **lombok** — annotation processing

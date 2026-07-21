@@ -1,4 +1,4 @@
-package com.example.mission.exception;
+package com.example.clawbot.exception;
 
 
 import lombok.Data;

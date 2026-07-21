@@ -1,4 +1,4 @@
-package com.example.mission.service;
+package com.example.clawbot.service;
 
 import com.github.wechat.ilink.sdk.ILinkClient;
 import com.github.wechat.ilink.sdk.core.config.ILinkConfig;

@@ -32,6 +32,12 @@ build/
 ### VS Code ###
 .vscode/
 
+### Node ###
+node_modules/
+
+### Claude Code ###
+.claude/settings.local.json
+
 ### Sensitive Config ###
 application.properties
 *.env

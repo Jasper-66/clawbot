@@ -1,4 +1,4 @@
-package com.example.mission.exception;
+package com.example.clawbot.exception;
 
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;

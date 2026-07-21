@@ -1,4 +1,4 @@
-package com.example.mission.service;
+package com.example.clawbot.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
