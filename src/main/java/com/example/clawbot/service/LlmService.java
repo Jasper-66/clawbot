@@ -25,7 +25,7 @@ import java.util.concurrent.ConcurrentHashMap;
 @Slf4j
 @Service
 @RequiredArgsConstructor
-public class LlmService {
+public class    LlmService {
 
     private final RestTemplate restTemplate;
     private final WeatherTool weatherTool;
