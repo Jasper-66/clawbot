@@ -1,5 +1,6 @@
 package com.example.clawbot.service;
 
+import com.example.clawbot.tool.WeatherTool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -26,40 +27,36 @@ import java.util.concurrent.ConcurrentHashMap;
 public class LlmService {
 
     private final RestTemplate restTemplate;
+    private final WeatherTool weatherTool;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    // 每个用户最近 N 条消息历史，userId → 消息列表
     private final ConcurrentHashMap<String, LinkedList<Map<String, Object>>> conversations = new ConcurrentHashMap<>();
     private static final int MAX_HISTORY = 10;
 
-    // DeepSeek 文本对话
     @Value("${deepseek.api.key}")
-    private String apiKey; // DeepSeek API 密钥
+    private String apiKey;
 
     @Value("${deepseek.api.base-url}")
-    private String baseUrl; // DeepSeek API 地址
+    private String baseUrl;
 
     @Value("${deepseek.api.model}")
-    private String model; // DeepSeek 模型名称
+    private String model;
 
-    // Vision API 图片识别
     @Value("${vision.api.key}")
-    private String visionApiKey; // Vision API 密钥
+    private String visionApiKey;
 
     @Value("${vision.api.base-url}")
-    private String visionBaseUrl; // Vision API 地址
+    private String visionBaseUrl;
 
     @Value("${vision.api.model}")
-    private String visionModel; // Vision 模型名称
+    private String visionModel;
 
     private static final String SYSTEM_PROMPT =
-            "你是一个友好的微信助手，请用简洁、自然的中文回答用户的问题。回答尽量控制在200字以内。"; // 系统角色提示词，设定助手行为风格
+            "你是一个友好的微信助手，请用简洁、自然的中文回答用户的问题。回答尽量控制在200字以内。";
 
-    //调用LLM API 进行纯文本对话，自动维护用户上下文
     public String chat(String userId, String userMessage) {
         LinkedList<Map<String, Object>> history = conversations.computeIfAbsent(userId, k -> new LinkedList<>());
 
-        // 构建消息列表：system + 历史 + 当前用户消息
         List<Map<String, Object>> messages = new ArrayList<>();
         messages.add(Map.of("role", "system", "content", SYSTEM_PROMPT));
 
@@ -68,16 +65,71 @@ public class LlmService {
         }
         messages.add(Map.of("role", "user", "content", userMessage));
 
-        Map<String, Object> requestBody = new HashMap<>(Map.of(
-                "model", model,
-                "messages", messages,
-                "temperature", 0.7,
-                "max_tokens", 1024
-        ));
+        // 构建带 tools 的请求体
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("model", model);
+        requestBody.put("messages", messages);
+        requestBody.put("temperature", 0.7);
+        requestBody.put("max_tokens", 1024);
+        requestBody.put("tools", List.of(weatherTool.getToolDefinition()));
+        requestBody.put("tool_choice", "auto");
 
-        String reply = callLlm(baseUrl, apiKey, requestBody);
+        JsonNode response = callLlmForJson(baseUrl, apiKey, requestBody);
+        if (response == null) {
+            return "抱歉，AI 服务暂时不可用。";
+        }
 
-        // 将本轮对话加入历史，保持最近 MAX_HISTORY 条
+        JsonNode choice = response.get("choices").get(0);
+        JsonNode message = choice.get("message");
+
+        String reply;
+
+        if (message.has("tool_calls")) {
+            // 将 assistant 的 tool_calls 消息加入 messages
+            Map<String, Object> assistantMsg = objectMapper.convertValue(message, Map.class);
+            messages.add(assistantMsg);
+
+            JsonNode toolCalls = message.get("tool_calls");
+            for (JsonNode tc : toolCalls) {
+                String funcName = tc.get("function").get("name").asText();
+                String args = tc.get("function").get("arguments").asText();
+                String callId = tc.get("id").asText();
+
+                String toolResult;
+                if (weatherTool.getToolName().equals(funcName)) {
+                    toolResult = weatherTool.execute(args);
+                } else {
+                    toolResult = "未知的工具：" + funcName;
+                }
+
+                messages.add(Map.of(
+                        "role", "tool",
+                        "tool_call_id", callId,
+                        "content", toolResult
+                ));
+            }
+
+            // 第二次调用，不传 tools，获取最终文本回复
+            Map<String, Object> secondBody = new HashMap<>();
+            secondBody.put("model", model);
+            secondBody.put("messages", messages);
+            secondBody.put("temperature", 0.7);
+            secondBody.put("max_tokens", 1024);
+
+            JsonNode finalResponse = callLlmForJson(baseUrl, apiKey, secondBody);
+            if (finalResponse == null) {
+                return "抱歉，我暂时无法处理，请稍后再试。";
+            }
+            reply = finalResponse.get("choices").get(0).get("message").get("content").asText();
+        } else {
+            reply = message.get("content").asText();
+        }
+
+        if (reply == null) {
+            reply = "抱歉，我暂时无法处理，请稍后再试。";
+        }
+
+        // 只存储 user 消息和最终 assistant 回复到历史
         synchronized (history) {
             history.add(Map.of("role", "user", "content", userMessage));
             history.add(Map.of("role", "assistant", "content", reply));
@@ -86,10 +138,9 @@ public class LlmService {
             }
         }
 
-        return reply;
+        return reply.trim();
     }
 
-    // 调用 Vision API 解析图片内容，携带文本对话上下文
     public String chatWithImage(String userId, byte[] imageBytes, String fileName) {
         String base64 = Base64.getEncoder().encodeToString(imageBytes);
         String mimeType = getMimeType(fileName);
@@ -103,7 +154,6 @@ public class LlmService {
                 "image_url", Map.of("url", dataUrl)
         ));
 
-        // 构建消息列表：system + 文本历史（跳过图片消息）+ 当前图片消息
         List<Map<String, Object>> messages = new ArrayList<>();
         messages.add(Map.of("role", "system", "content", SYSTEM_PROMPT));
 
@@ -123,7 +173,6 @@ public class LlmService {
 
         String reply = callLlm(visionBaseUrl, visionApiKey, requestBody);
 
-        // 将本轮对话（纯文本形式）加入历史
         LinkedList<Map<String, Object>> h = conversations.computeIfAbsent(userId, k -> new LinkedList<>());
         synchronized (h) {
             h.add(Map.of("role", "user", "content", "[发送了一张图片]"));
@@ -136,15 +185,13 @@ public class LlmService {
         return reply;
     }
 
-    // 通用 LLM API 调用方法，支持文本和图片两种场景复用
-    private String callLlm(String apiUrl, String key, Map<String, Object> requestBody) {
+    // 返回 JsonNode，供 function calling 流程使用
+    private JsonNode callLlmForJson(String apiUrl, String key, Map<String, Object> requestBody) {
         try {
-            // 设置请求头：JSON 格式 + Bearer Token 鉴权
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
             headers.setBearerAuth(key);
 
-            // 将请求体序列化为 JSON 字符串，发送 POST 请求
             String requestJson = objectMapper.writeValueAsString(requestBody);
             log.info("LLM 请求: model={}, url={}", requestBody.get("model"), apiUrl);
 
@@ -152,35 +199,42 @@ public class LlmService {
             ResponseEntity<String> response = restTemplate.postForEntity(
                     apiUrl + "/v1/chat/completions", entity, String.class);
 
-            // 检查响应体是否为空
             String responseBody = response.getBody();
             if (responseBody == null) {
                 log.error("LLM 返回空响应, status={}", response.getStatusCode());
-                return "抱歉，我暂时无法处理，请稍后再试。";
+                return null;
             }
 
             JsonNode root = objectMapper.readTree(responseBody);
 
-            // 检查 API 是否返回了错误
             if (root.has("error")) {
                 log.error("LLM API 错误: {}", root.get("error").toString());
-                return "抱歉，AI 服务暂时不可用。";
+                return null;
             }
 
-            // 提取 assistant 的回复内容
-            String content = root.get("choices").get(0).get("message").get("content").asText();
-            log.info("LLM 回复: {}", content);
-            return content.trim();
+            return root;
 
         } catch (Exception e) {
             log.error("LLM 调用失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private String callLlm(String apiUrl, String key, Map<String, Object> requestBody) {
+        JsonNode root = callLlmForJson(apiUrl, key, requestBody);
+        if (root == null) {
+            return "抱歉，AI 服务暂时不可用。";
+        }
+        try {
+            String content = root.get("choices").get(0).get("message").get("content").asText();
+            log.info("LLM 回复: {}", content);
+            return content != null ? content.trim() : "抱歉，我暂时无法处理，请稍后再试。";
+        } catch (Exception e) {
+            log.error("解析 LLM 响应失败: {}", e.getMessage());
             return "抱歉，我暂时无法处理，请稍后再试。";
         }
     }
 
-
-
-    // 根据文件名后缀推断 MIME 类型，未知后缀默认返回 image/png
     private String getMimeType(String fileName) {
         if (fileName == null) return "image/png";
         String lower = fileName.toLowerCase();
