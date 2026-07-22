@@ -1,5 +1,8 @@
 package com.example.clawbot.service;
 
+import com.example.clawbot.tool.GeocodeTool;
+import com.example.clawbot.tool.PlanRouteTool;
+import com.example.clawbot.tool.SearchNearbyTool;
 import com.example.clawbot.tool.WeatherTool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -28,11 +31,14 @@ public class LlmService {
 
     private final RestTemplate restTemplate;
     private final WeatherTool weatherTool;
+    private final GeocodeTool geocodeTool;
+    private final SearchNearbyTool searchNearbyTool;
+    private final PlanRouteTool planRouteTool;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private final ConcurrentHashMap<String, LinkedList<Map<String, Object>>> conversations = new ConcurrentHashMap<>();
     private static final int MAX_HISTORY = 10;
-    private static final int MAX_TOOL_ROUNDS = 3;
+    private static final int MAX_TOOL_ROUNDS = 30;
 
     @Value("${deepseek.api.key}")
     private String apiKey;
@@ -71,7 +77,12 @@ public class LlmService {
         requestBody.put("messages", messages);
         requestBody.put("temperature", 0.7);
         requestBody.put("max_tokens", 1024);
-        requestBody.put("tools", List.of(weatherTool.getToolDefinition()));
+        requestBody.put("tools", List.of(
+                weatherTool.getToolDefinition(),
+                geocodeTool.getToolDefinition(),
+                searchNearbyTool.getToolDefinition(),
+                planRouteTool.getToolDefinition()
+        ));
         requestBody.put("tool_choice", "auto");
 
         String reply = callLlmWithTools(requestBody, messages);
@@ -115,7 +126,7 @@ public class LlmService {
                     JsonNode function = toolCall.path("function");
                     String functionName = function.path("name").asText("");
                     String arguments = function.path("arguments").asText("{}");
-                    String toolResult = weatherTool.execute(functionName, arguments);
+                    String toolResult = executeTool(functionName, arguments);
                     log.info("执行工具: name={}, id={}", functionName, toolCallId);
 
                     messages.add(Map.of(
@@ -130,6 +141,22 @@ public class LlmService {
             log.error("Function Calling 调用失败", e);
             return "抱歉，我暂时无法处理，请稍后再试。";
         }
+    }
+
+    private String executeTool(String functionName, String arguments) {
+        if (weatherTool.getToolName().equals(functionName)) {
+            return weatherTool.execute(functionName, arguments);
+        }
+        if (geocodeTool.getToolName().equals(functionName)) {
+            return geocodeTool.execute(functionName, arguments);
+        }
+        if (searchNearbyTool.getToolName().equals(functionName)) {
+            return searchNearbyTool.execute(functionName, arguments);
+        }
+        if (planRouteTool.getToolName().equals(functionName)) {
+            return planRouteTool.execute(functionName, arguments);
+        }
+        return "工具调用失败：未找到工具 " + functionName;
     }
 
     private Map<String, Object> toAssistantToolCallMessage(JsonNode assistant) {
