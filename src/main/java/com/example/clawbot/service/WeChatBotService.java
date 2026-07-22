@@ -34,7 +34,22 @@ public class WeChatBotService {
     //初始化startBot避免阻塞线程，采用异步编程
     @PostConstruct
     public void init() {
+        // 注册 Function Calling 工具
+        registerTools();
         CompletableFuture.runAsync(this::startBot);
+    }
+
+    private void registerTools() {
+        // 天气工具：接收城市名，返回 JSON 字符串
+        llmService.registerTool("get_weather", city -> {
+            try {
+                var data = weatherService.getWeatherData(city);
+                return new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(data);
+            } catch (Exception e) {
+                log.error("天气工具执行失败: {}", city, e);
+                return "{\"error\":\"查询天气失败: " + e.getMessage() + "\"}";
+            }
+        });
     }
 
     //构建ilink客户端
@@ -109,13 +124,11 @@ public class WeChatBotService {
                     handleVoiceCommand(fromUser, text);
                 } else if (isTtsRequest(text)) {
                     handleTts(fromUser, extractTtsText(text));
-                } else if (text.contains("天气")) {
-                    String city = extractCity(text);
-                    sendReply(fromUser, weatherService.getWeather(city));
                 } else if (isImageGenRequest(text)) {
                     handleImageGeneration(fromUser, text);
                 } else {
-                    sendReply(fromUser, llmService.chat(fromUser, text));
+                    // 统一走 LLM + Function Calling，由 AI 自主决定是否调用工具
+                    sendReply(fromUser, llmService.chatWithTools(fromUser, text));
                 }
             } else if (item.getImage_item() != null) {
                 log.info("收到图片 from={}", fromUser);
@@ -189,14 +202,6 @@ public class WeChatBotService {
         return prompt.isEmpty() ? text : prompt;
     }
 
-    private String extractCity(String text) {
-        String city = text.replaceAll("天气", "").trim();
-        //如果城市为空会默认发送 上海/北京天气
-        if (city.isEmpty()) {
-            city = text.contains("北京") ? "北京" : "上海";
-        }
-        return city;
-    }
     //检查字符串是否以指定字符串开始 return true/false
     private boolean isTtsRequest(String text) {
         return text.startsWith("朗读") || text.startsWith("读一下")
@@ -233,19 +238,14 @@ public class WeChatBotService {
             else if (encodeType != null && encodeType == 0) fileName = "voice.wav";
 
             String recognizedText = speechService.speechToText(voiceBytes, fileName);
-            log.info("语音识别结果: text=[{}], isImageGen={}, hasWeather={}",
-                    recognizedText, isImageGenRequest(recognizedText), recognizedText.contains("天气"));
+            log.info("语音识别结果: text=[{}], isImageGen={}",
+                    recognizedText, isImageGenRequest(recognizedText));
 
-            // 路由分发：图片生成 / 天气 / 闲聊
+            // 路由分发：图片生成 / Function Calling（天气等工具由 LLM 自动调用）
             if (isImageGenRequest(recognizedText)) {
                 handleImageGeneration(fromUser, recognizedText);
-            } else if (recognizedText.contains("天气")) {
-                String city = extractCity(recognizedText);
-                String weather = weatherService.getWeather(city);
-                byte[] replyAudio = speechService.textToSpeech(fromUser, weather);
-                client.sendFile(fromUser, replyAudio, "天气语音.wav", "");
             } else {
-                String llmReply = llmService.chat(fromUser, recognizedText);
+                String llmReply = llmService.chatWithTools(fromUser, recognizedText);
                 byte[] replyAudio = speechService.textToSpeech(fromUser, llmReply);
                 client.sendFile(fromUser, replyAudio, "语音回复.wav", "");
                 log.info("语音文件已发送给 {}", fromUser);

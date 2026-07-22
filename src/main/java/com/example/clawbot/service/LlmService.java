@@ -15,10 +15,12 @@ import org.springframework.web.client.RestTemplate;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 
 @Slf4j
 @Service
@@ -55,6 +57,35 @@ public class LlmService {
     private static final String SYSTEM_PROMPT =
             "你是一个友好的微信助手，请用简洁、自然的中文回答用户的问题。回答尽量控制在200字以内。"; // 系统角色提示词，设定助手行为风格
 
+    // 工具定义 — Function Calling 注册表
+    private static final List<Map<String, Object>> TOOLS = List.of(
+            Map.of(
+                    "type", "function",
+                    "function", Map.of(
+                            "name", "get_weather",
+                            "description", "查询指定城市的当前天气信息，包括温度、天气状况、湿度、风向风力等",
+                            "parameters", Map.of(
+                                    "type", "object",
+                                    "properties", Map.of(
+                                            "city", Map.of(
+                                                    "type", "string",
+                                                    "description", "城市名称，如：杭州、北京、上海"
+                                            )
+                                    ),
+                                    "required", List.of("city")
+                            )
+                    )
+            )
+    );
+
+    // 工具执行器注册表：name → 执行函数
+    private final Map<String, Function<String, String>> toolExecutors = new HashMap<>();
+
+    // 注册工具执行器（由各 Service 在启动时调用）
+    public void registerTool(String name, Function<String, String> executor) {
+        toolExecutors.put(name, executor);
+    }
+
     //调用LLM API 进行纯文本对话，自动维护用户上下文
     public String chat(String userId, String userMessage) {
         LinkedList<Map<String, Object>> history = conversations.computeIfAbsent(userId, k -> new LinkedList<>());
@@ -87,6 +118,132 @@ public class LlmService {
         }
 
         return reply;
+    }
+
+    // 带 Function Calling 的对话：LLM 自行决定是否调用工具
+    public String chatWithTools(String userId, String userMessage) {
+        LinkedList<Map<String, Object>> history = conversations.computeIfAbsent(userId, k -> new LinkedList<>());
+
+        List<Map<String, Object>> messages = new ArrayList<>();
+        messages.add(Map.of("role", "system", "content", SYSTEM_PROMPT));
+        synchronized (history) {
+            messages.addAll(history);
+        }
+        messages.add(Map.of("role", "user", "content", userMessage));
+
+        // Function Calling 循环：LLM 可能连续请求多个工具调用
+        for (int i = 0; i < 5; i++) {
+            Map<String, Object> requestBody = new HashMap<>(Map.of(
+                    "model", model,
+                    "messages", messages,
+                    "tools", TOOLS,
+                    "temperature", 0.7,
+                    "max_tokens", 1024
+            ));
+
+            String responseBody = callLlmRaw(baseUrl, apiKey, requestBody);
+            if (responseBody == null) return "抱歉，我暂时无法处理，请稍后再试。";
+
+            try {
+                JsonNode root = objectMapper.readTree(responseBody);
+                if (root.has("error")) {
+                    log.error("LLM API 错误: {}", root.get("error").toString());
+                    return "抱歉，AI 服务暂时不可用。";
+                }
+
+                JsonNode choice = root.get("choices").get(0);
+                JsonNode message = choice.get("message");
+                String finishReason = choice.get("finish_reason").asText();
+
+                // 没有工具调用，直接返回文本回复
+                if (!"tool_calls".equals(finishReason)) {
+                    String content = message.get("content").asText();
+                    // 保存对话历史
+                    synchronized (history) {
+                        history.add(Map.of("role", "user", "content", userMessage));
+                        history.add(Map.of("role", "assistant", "content", content));
+                        while (history.size() > MAX_HISTORY) {
+                            history.removeFirst();
+                        }
+                    }
+                    return content.trim();
+                }
+
+                // 有工具调用：把 assistant 的 tool_calls 消息加入 messages
+                Map<String, Object> assistantMsg = new LinkedHashMap<>();
+                assistantMsg.put("role", "assistant");
+                assistantMsg.put("tool_calls", objectMapper.treeToValue(message.get("tool_calls"), List.class));
+                messages.add(assistantMsg);
+
+                // 逐个执行工具调用，把结果加入 messages
+                for (JsonNode toolCall : message.get("tool_calls")) {
+                    String callId = toolCall.get("id").asText();
+                    String funcName = toolCall.get("function").get("name").asText();
+                    String argsJson = toolCall.get("function").get("arguments").asText();
+
+                    log.info("Function Calling: name={}, args={}", funcName, argsJson);
+
+                    String result = executeTool(funcName, argsJson);
+                    log.info("Function Result: {}", result);
+
+                    messages.add(Map.of(
+                            "role", "tool",
+                            "tool_call_id", callId,
+                            "content", result
+                    ));
+                }
+
+            } catch (Exception e) {
+                log.error("解析 LLM 响应失败", e);
+                return "抱歉，处理出错了。";
+            }
+        }
+        return "抱歉，处理轮次过多，请简化问题。";
+    }
+
+    // 执行工具调用
+    private String executeTool(String toolName, String argsJson) {
+        try {
+            Function<String, String> executor = toolExecutors.get(toolName);
+            if (executor == null) {
+                return objectMapper.writeValueAsString(Map.of("error", "未知工具: " + toolName));
+            }
+            JsonNode args = objectMapper.readTree(argsJson);
+            String param = args.get("city") != null ? args.get("city").asText() : args.fields().next().getValue().asText();
+            return executor.apply(param);
+        } catch (Exception e) {
+            log.error("工具执行失败: {}", toolName, e);
+            try {
+                return objectMapper.writeValueAsString(Map.of("error", "工具执行失败: " + e.getMessage()));
+            } catch (Exception ex) {
+                return "{\"error\":\"工具执行失败\"}";
+            }
+        }
+    }
+
+    // 原始 LLM 调用，返回响应字符串（供 Function Calling 多轮调用复用）
+    private String callLlmRaw(String apiUrl, String key, Map<String, Object> requestBody) {
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.setBearerAuth(key);
+
+            String requestJson = objectMapper.writeValueAsString(requestBody);
+            log.info("LLM 请求: model={}, url={}", requestBody.get("model"), apiUrl);
+
+            HttpEntity<String> entity = new HttpEntity<>(requestJson, headers);
+            ResponseEntity<String> response = restTemplate.postForEntity(
+                    apiUrl + "/v1/chat/completions", entity, String.class);
+
+            String responseBody = response.getBody();
+            if (responseBody == null) {
+                log.error("LLM 返回空响应, status={}", response.getStatusCode());
+            }
+            return responseBody;
+        } catch (Exception e) {
+            log.error("LLM 调用失败: {}", e.getMessage());
+            return null;
+        }
     }
 
     // 调用 Vision API 解析图片内容，携带文本对话上下文
