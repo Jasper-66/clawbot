@@ -1,5 +1,6 @@
 package com.example.clawbot.service;
 
+import com.example.clawbot.tool.WeatherTool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -15,6 +16,7 @@ import org.springframework.web.client.RestTemplate;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -26,11 +28,13 @@ import java.util.concurrent.ConcurrentHashMap;
 public class LlmService {
 
     private final RestTemplate restTemplate;
+    private final WeatherTool weatherTool;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     // 每个用户最近 N 条消息历史，userId → 消息列表
     private final ConcurrentHashMap<String, LinkedList<Map<String, Object>>> conversations = new ConcurrentHashMap<>();
     private static final int MAX_HISTORY = 10;
+    private static final int MAX_TOOL_ROUNDS = 3;
 
     // DeepSeek 文本对话
     @Value("${deepseek.api.key}")
@@ -53,7 +57,8 @@ public class LlmService {
     private String visionModel; // Vision 模型名称
 
     private static final String SYSTEM_PROMPT =
-            "你是一个友好的微信助手，请用简洁、自然的中文回答用户的问题。回答尽量控制在200字以内。"; // 系统角色提示词，设定助手行为风格
+            "你是一个友好的微信助手，请用简洁、自然的中文回答用户的问题。回答尽量控制在200字以内。"
+                    + "用户询问实时天气时必须调用天气工具，不要凭已有知识编造天气。"; // 系统角色提示词，设定助手行为风格
 
     //调用LLM API 进行纯文本对话，自动维护用户上下文
     public String chat(String userId, String userMessage) {
@@ -71,11 +76,13 @@ public class LlmService {
         Map<String, Object> requestBody = new HashMap<>(Map.of(
                 "model", model,
                 "messages", messages,
+                "tools", List.of(weatherTool.definition()),
+                "tool_choice", "auto",
                 "temperature", 0.7,
                 "max_tokens", 1024
         ));
 
-        String reply = callLlm(baseUrl, apiKey, requestBody);
+        String reply = callLlmWithTools(requestBody, messages);
 
         // 将本轮对话加入历史，保持最近 MAX_HISTORY 条
         synchronized (history) {
@@ -87,6 +94,95 @@ public class LlmService {
         }
 
         return reply;
+    }
+
+    /**
+     * 完成 Function Calling 闭环：请求模型、执行工具、回传结果，再获取最终回答。
+     */
+    private String callLlmWithTools(Map<String, Object> requestBody,
+                                    List<Map<String, Object>> messages) {
+        try {
+            for (int toolRound = 0; toolRound <= MAX_TOOL_ROUNDS; toolRound++) {
+                JsonNode assistant = callChatCompletion(baseUrl, apiKey, requestBody);
+                JsonNode toolCalls = assistant.path("tool_calls");
+
+                if (!toolCalls.isArray() || toolCalls.isEmpty()) {
+                    String content = assistant.path("content").asText("").trim();
+                    return content.isEmpty() ? "抱歉，我没有生成有效回复，请稍后再试。" : content;
+                }
+                if (toolRound == MAX_TOOL_ROUNDS) {
+                    return "抱歉，工具调用次数过多，请换一种方式提问。";
+                }
+
+                messages.add(toAssistantToolCallMessage(assistant));
+                for (JsonNode toolCall : toolCalls) {
+                    String toolCallId = toolCall.path("id").asText("");
+                    if (toolCallId.isBlank()) {
+                        throw new IllegalStateException("工具调用缺少 id");
+                    }
+
+                    JsonNode function = toolCall.path("function");
+                    String functionName = function.path("name").asText("");
+                    String arguments = function.path("arguments").asText("{}");
+                    String toolResult = weatherTool.execute(functionName, arguments);
+                    log.info("执行工具: name={}, id={}", functionName, toolCallId);
+
+                    messages.add(Map.of(
+                            "role", "tool",
+                            "tool_call_id", toolCallId,
+                            "content", toolResult
+                    ));
+                }
+            }
+            return "抱歉，我暂时无法处理，请稍后再试。";
+        } catch (Exception e) {
+            log.error("Function Calling 调用失败", e);
+            return "抱歉，我暂时无法处理，请稍后再试。";
+        }
+    }
+
+    private Map<String, Object> toAssistantToolCallMessage(JsonNode assistant) {
+        Map<String, Object> message = new LinkedHashMap<>();
+        message.put("role", "assistant");
+        message.put("content", assistant.path("content").isNull()
+                ? null : assistant.path("content").asText());
+        message.put("tool_calls", objectMapper.convertValue(assistant.path("tool_calls"), List.class));
+
+        // DeepSeek 思考模式调用工具后，后续请求必须原样带回 reasoning_content。
+        if (assistant.hasNonNull("reasoning_content")) {
+            message.put("reasoning_content", assistant.get("reasoning_content").asText());
+        }
+        return message;
+    }
+
+    private JsonNode callChatCompletion(String apiUrl, String key,
+                                        Map<String, Object> requestBody) throws Exception {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(key);
+
+        String requestJson = objectMapper.writeValueAsString(requestBody);
+        log.info("LLM 请求: model={}, url={}", requestBody.get("model"), apiUrl);
+        HttpEntity<String> entity = new HttpEntity<>(requestJson, headers);
+        ResponseEntity<String> response = restTemplate.postForEntity(
+                apiUrl + "/v1/chat/completions", entity, String.class);
+
+        String responseBody = response.getBody();
+        if (responseBody == null) {
+            throw new IllegalStateException("LLM 返回空响应");
+        }
+
+        JsonNode root = objectMapper.readTree(responseBody);
+        if (root.has("error")) {
+            throw new IllegalStateException("LLM API 错误: " + root.get("error"));
+        }
+
+        JsonNode choices = root.path("choices");
+        if (!choices.isArray() || choices.isEmpty()
+                || choices.get(0).path("message").isMissingNode()) {
+            throw new IllegalStateException("LLM 响应缺少 choices[0].message");
+        }
+        return choices.get(0).path("message");
     }
 
     // 调用 Vision API 解析图片内容，携带文本对话上下文

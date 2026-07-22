@@ -21,7 +21,6 @@ import java.util.concurrent.ConcurrentHashMap;
 @RequiredArgsConstructor
 public class WeChatBotService {
 
-    private final WeatherService weatherService;
     private final LlmService llmService;
     private final ImageGenerationService imageGenerationService;
     private final SpeechService speechService;
@@ -109,9 +108,6 @@ public class WeChatBotService {
                     handleVoiceCommand(fromUser, text);
                 } else if (isTtsRequest(text)) {
                     handleTts(fromUser, extractTtsText(text));
-                } else if (text.contains("天气")) {
-                    String city = extractCity(text);
-                    sendReply(fromUser, weatherService.getWeather(city));
                 } else if (isImageGenRequest(text)) {
                     handleImageGeneration(fromUser, text);
                 } else {
@@ -189,14 +185,6 @@ public class WeChatBotService {
         return prompt.isEmpty() ? text : prompt;
     }
 
-    private String extractCity(String text) {
-        String city = text.replaceAll("天气", "").trim();
-        //如果城市为空会默认发送 上海/北京天气
-        if (city.isEmpty()) {
-            city = text.contains("北京") ? "北京" : "上海";
-        }
-        return city;
-    }
     //检查字符串是否以指定字符串开始 return true/false
     private boolean isTtsRequest(String text) {
         return text.startsWith("朗读") || text.startsWith("读一下")
@@ -233,17 +221,12 @@ public class WeChatBotService {
             else if (encodeType != null && encodeType == 0) fileName = "voice.wav";
 
             String recognizedText = speechService.speechToText(voiceBytes, fileName);
-            log.info("语音识别结果: text=[{}], isImageGen={}, hasWeather={}",
-                    recognizedText, isImageGenRequest(recognizedText), recognizedText.contains("天气"));
+            log.info("语音识别结果: text=[{}], isImageGen={}",
+                    recognizedText, isImageGenRequest(recognizedText));
 
-            // 路由分发：图片生成 / 天气 / 闲聊
+            // 图片生成保留专用流程，其余文本由 LLM 决定是否调用工具。
             if (isImageGenRequest(recognizedText)) {
                 handleImageGeneration(fromUser, recognizedText);
-            } else if (recognizedText.contains("天气")) {
-                String city = extractCity(recognizedText);
-                String weather = weatherService.getWeather(city);
-                byte[] replyAudio = speechService.textToSpeech(fromUser, weather);
-                client.sendFile(fromUser, replyAudio, "天气语音.wav", "");
             } else {
                 String llmReply = llmService.chat(fromUser, recognizedText);
                 byte[] replyAudio = speechService.textToSpeech(fromUser, llmReply);
