@@ -15,7 +15,7 @@ import org.springframework.web.client.RestTemplate;
 
 import java.util.ArrayList;
 import java.util.Base64;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -32,6 +32,7 @@ public class LlmService {
 
     private final ConcurrentHashMap<String, LinkedList<Map<String, Object>>> conversations = new ConcurrentHashMap<>();
     private static final int MAX_HISTORY = 10;
+    private static final int MAX_TOOL_ROUNDS = 3;
 
     @Value("${deepseek.api.key}")
     private String apiKey;
@@ -65,8 +66,7 @@ public class LlmService {
         }
         messages.add(Map.of("role", "user", "content", userMessage));
 
-        // 构建带 tools 的请求体
-        Map<String, Object> requestBody = new HashMap<>();
+        Map<String, Object> requestBody = new LinkedHashMap<>();
         requestBody.put("model", model);
         requestBody.put("messages", messages);
         requestBody.put("temperature", 0.7);
@@ -74,62 +74,8 @@ public class LlmService {
         requestBody.put("tools", List.of(weatherTool.getToolDefinition()));
         requestBody.put("tool_choice", "auto");
 
-        JsonNode response = callLlmForJson(baseUrl, apiKey, requestBody);
-        if (response == null) {
-            return "抱歉，AI 服务暂时不可用。";
-        }
+        String reply = callLlmWithTools(requestBody, messages);
 
-        JsonNode choice = response.get("choices").get(0);
-        JsonNode message = choice.get("message");
-
-        String reply;
-
-        if (message.has("tool_calls")) {
-            // 将 assistant 的 tool_calls 消息加入 messages
-            Map<String, Object> assistantMsg = objectMapper.convertValue(message, Map.class);
-            messages.add(assistantMsg);
-
-            JsonNode toolCalls = message.get("tool_calls");
-            for (JsonNode tc : toolCalls) {
-                String funcName = tc.get("function").get("name").asText();
-                String args = tc.get("function").get("arguments").asText();
-                String callId = tc.get("id").asText();
-
-                String toolResult;
-                if (weatherTool.getToolName().equals(funcName)) {
-                    toolResult = weatherTool.execute(args);
-                } else {
-                    toolResult = "未知的工具：" + funcName;
-                }
-
-                messages.add(Map.of(
-                        "role", "tool",
-                        "tool_call_id", callId,
-                        "content", toolResult
-                ));
-            }
-
-            // 第二次调用，不传 tools，获取最终文本回复
-            Map<String, Object> secondBody = new HashMap<>();
-            secondBody.put("model", model);
-            secondBody.put("messages", messages);
-            secondBody.put("temperature", 0.7);
-            secondBody.put("max_tokens", 1024);
-
-            JsonNode finalResponse = callLlmForJson(baseUrl, apiKey, secondBody);
-            if (finalResponse == null) {
-                return "抱歉，我暂时无法处理，请稍后再试。";
-            }
-            reply = finalResponse.get("choices").get(0).get("message").get("content").asText();
-        } else {
-            reply = message.get("content").asText();
-        }
-
-        if (reply == null) {
-            reply = "抱歉，我暂时无法处理，请稍后再试。";
-        }
-
-        // 只存储 user 消息和最终 assistant 回复到历史
         synchronized (history) {
             history.add(Map.of("role", "user", "content", userMessage));
             history.add(Map.of("role", "assistant", "content", reply));
@@ -139,6 +85,95 @@ public class LlmService {
         }
 
         return reply.trim();
+    }
+
+    /**
+     * 完成 Function Calling 闭环：请求模型、执行工具、回传结果，再获取最终回答。
+     */
+    private String callLlmWithTools(Map<String, Object> requestBody,
+                                    List<Map<String, Object>> messages) {
+        try {
+            for (int toolRound = 0; toolRound <= MAX_TOOL_ROUNDS; toolRound++) {
+                JsonNode assistant = callChatCompletion(baseUrl, apiKey, requestBody);
+                JsonNode toolCalls = assistant.path("tool_calls");
+
+                if (!toolCalls.isArray() || toolCalls.isEmpty()) {
+                    String content = assistant.path("content").asText("").trim();
+                    return content.isEmpty() ? "抱歉，我没有生成有效回复，请稍后再试。" : content;
+                }
+                if (toolRound == MAX_TOOL_ROUNDS) {
+                    return "抱歉，工具调用次数过多，请换一种方式提问。";
+                }
+
+                messages.add(toAssistantToolCallMessage(assistant));
+                for (JsonNode toolCall : toolCalls) {
+                    String toolCallId = toolCall.path("id").asText("");
+                    if (toolCallId.isBlank()) {
+                        throw new IllegalStateException("工具调用缺少 id");
+                    }
+
+                    JsonNode function = toolCall.path("function");
+                    String functionName = function.path("name").asText("");
+                    String arguments = function.path("arguments").asText("{}");
+                    String toolResult = weatherTool.execute(functionName, arguments);
+                    log.info("执行工具: name={}, id={}", functionName, toolCallId);
+
+                    messages.add(Map.of(
+                            "role", "tool",
+                            "tool_call_id", toolCallId,
+                            "content", toolResult
+                    ));
+                }
+            }
+            return "抱歉，我暂时无法处理，请稍后再试。";
+        } catch (Exception e) {
+            log.error("Function Calling 调用失败", e);
+            return "抱歉，我暂时无法处理，请稍后再试。";
+        }
+    }
+
+    private Map<String, Object> toAssistantToolCallMessage(JsonNode assistant) {
+        Map<String, Object> message = new LinkedHashMap<>();
+        message.put("role", "assistant");
+        message.put("content", assistant.path("content").isNull()
+                ? null : assistant.path("content").asText());
+        message.put("tool_calls", objectMapper.convertValue(assistant.path("tool_calls"), List.class));
+
+        // DeepSeek 思考模式调用工具后，后续请求必须原样带回 reasoning_content
+        if (assistant.hasNonNull("reasoning_content")) {
+            message.put("reasoning_content", assistant.get("reasoning_content").asText());
+        }
+        return message;
+    }
+
+    private JsonNode callChatCompletion(String apiUrl, String key,
+                                        Map<String, Object> requestBody) throws Exception {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(key);
+
+        String requestJson = objectMapper.writeValueAsString(requestBody);
+        log.info("LLM 请求: model={}, url={}", requestBody.get("model"), apiUrl);
+        HttpEntity<String> entity = new HttpEntity<>(requestJson, headers);
+        ResponseEntity<String> response = restTemplate.postForEntity(
+                apiUrl + "/v1/chat/completions", entity, String.class);
+
+        String responseBody = response.getBody();
+        if (responseBody == null) {
+            throw new IllegalStateException("LLM 返回空响应");
+        }
+
+        JsonNode root = objectMapper.readTree(responseBody);
+        if (root.has("error")) {
+            throw new IllegalStateException("LLM API 错误: " + root.get("error"));
+        }
+
+        JsonNode choices = root.path("choices");
+        if (!choices.isArray() || choices.isEmpty()
+                || choices.get(0).path("message").isMissingNode()) {
+            throw new IllegalStateException("LLM 响应缺少 choices[0].message");
+        }
+        return choices.get(0).path("message");
     }
 
     public String chatWithImage(String userId, byte[] imageBytes, String fileName) {
@@ -185,53 +220,15 @@ public class LlmService {
         return reply;
     }
 
-    // 返回 JsonNode，供 function calling 流程使用
-    private JsonNode callLlmForJson(String apiUrl, String key, Map<String, Object> requestBody) {
+    private String callLlm(String apiUrl, String key, Map<String, Object> requestBody) {
         try {
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.setBearerAuth(key);
-
-            String requestJson = objectMapper.writeValueAsString(requestBody);
-            log.info("LLM 请求: model={}, url={}", requestBody.get("model"), apiUrl);
-
-            HttpEntity<String> entity = new HttpEntity<>(requestJson, headers);
-            ResponseEntity<String> response = restTemplate.postForEntity(
-                    apiUrl + "/v1/chat/completions", entity, String.class);
-
-            String responseBody = response.getBody();
-            if (responseBody == null) {
-                log.error("LLM 返回空响应, status={}", response.getStatusCode());
-                return null;
-            }
-
-            JsonNode root = objectMapper.readTree(responseBody);
-
-            if (root.has("error")) {
-                log.error("LLM API 错误: {}", root.get("error").toString());
-                return null;
-            }
-
-            return root;
-
+            JsonNode message = callChatCompletion(apiUrl, key, requestBody);
+            String content = message.path("content").asText("").trim();
+            log.info("LLM 回复: {}", content);
+            return content.isEmpty() ? "抱歉，我暂时无法处理，请稍后再试。" : content;
         } catch (Exception e) {
             log.error("LLM 调用失败: {}", e.getMessage());
-            return null;
-        }
-    }
-
-    private String callLlm(String apiUrl, String key, Map<String, Object> requestBody) {
-        JsonNode root = callLlmForJson(apiUrl, key, requestBody);
-        if (root == null) {
             return "抱歉，AI 服务暂时不可用。";
-        }
-        try {
-            String content = root.get("choices").get(0).get("message").get("content").asText();
-            log.info("LLM 回复: {}", content);
-            return content != null ? content.trim() : "抱歉，我暂时无法处理，请稍后再试。";
-        } catch (Exception e) {
-            log.error("解析 LLM 响应失败: {}", e.getMessage());
-            return "抱歉，我暂时无法处理，请稍后再试。";
         }
     }
 
