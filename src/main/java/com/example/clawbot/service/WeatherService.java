@@ -1,5 +1,6 @@
 package com.example.clawbot.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -27,7 +28,7 @@ public class WeatherService {
     }
 
     // Function Calling 专用：返回结构化天气数据
-    public Map<String, Object> getWeatherData(String city) {
+    public Map<String, Object> getWeatherData(String city) throws JsonProcessingException {
         String url = buildWeatherUrl(city.trim());
         String response = restTemplate.getForObject(url, String.class);
 
