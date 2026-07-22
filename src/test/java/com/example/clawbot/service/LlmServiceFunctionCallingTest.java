@@ -1,5 +1,6 @@
 package com.example.clawbot.service;
 
+import com.example.clawbot.tool.ReminderTool;
 import com.example.clawbot.tool.WeatherTool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -14,6 +15,7 @@ import org.springframework.web.client.RestTemplate;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
@@ -29,7 +31,9 @@ class LlmServiceFunctionCallingTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final WeatherService weatherService = mock(WeatherService.class);
-    private final WeatherTool weatherTool = new WeatherTool(weatherService, objectMapper);
+    private final WeatherTool weatherTool = new WeatherTool(weatherService);
+    private final ReminderService reminderService = new ReminderService();
+    private final ReminderTool reminderTool = new ReminderTool(reminderService);
     private RestTemplate restTemplate;
     private MockRestServiceServer server;
     private LlmService llmService;
@@ -38,7 +42,7 @@ class LlmServiceFunctionCallingTest {
     void setUp() {
         restTemplate = new RestTemplate();
         server = MockRestServiceServer.bindTo(restTemplate).build();
-        llmService = new LlmService(restTemplate, weatherTool);
+        llmService = new LlmService(restTemplate, weatherTool, reminderTool);
         ReflectionTestUtils.setField(llmService, "apiKey", "test-key");
         ReflectionTestUtils.setField(llmService, "baseUrl", "https://api.deepseek.com");
         ReflectionTestUtils.setField(llmService, "model", "deepseek-chat");
@@ -54,7 +58,7 @@ class LlmServiceFunctionCallingTest {
                     JsonNode body = readBody(((MockClientHttpRequest) request).getBodyAsBytes());
                     assertThat(body.path("tool_choice").asText()).isEqualTo("auto");
                     assertThat(body.path("tools").get(0).path("function").path("name").asText())
-                            .isEqualTo(WeatherTool.NAME);
+                            .isEqualTo(weatherTool.getToolName());
                 })
                 .andRespond(withSuccess("""
                         {
@@ -67,7 +71,7 @@ class LlmServiceFunctionCallingTest {
                                 "id": "call_weather_1",
                                 "type": "function",
                                 "function": {
-                                  "name": "get_current_weather",
+                                  "name": "get_weather",
                                   "arguments": "{\\\"city\\\":\\\"杭州\\\"}"
                                 }
                               }]
@@ -107,6 +111,72 @@ class LlmServiceFunctionCallingTest {
 
         assertThat(reply).isEqualTo("杭州现在晴，气温28°C。");
         verify(weatherService).getWeather("杭州");
+        server.verify();
+    }
+
+    @Test
+    void shouldCreateReminderThroughFunctionCalling() {
+        server.expect(requestTo(CHAT_URL))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(request -> {
+                    JsonNode body = readBody(((MockClientHttpRequest) request).getBodyAsBytes());
+                    assertThat(body.path("tools").get(1).path("function").path("name").asText())
+                            .isEqualTo(reminderTool.getToolName());
+                })
+                .andRespond(withSuccess("""
+                        {
+                          "choices": [{
+                            "finish_reason": "tool_calls",
+                            "message": {
+                              "role": "assistant",
+                              "content": null,
+                              "tool_calls": [{
+                                "id": "call_reminder_1",
+                                "type": "function",
+                                "function": {
+                                  "name": "create_reminder",
+                                  "arguments": "{\\\"content\\\":\\\"参加会议\\\",\\\"trigger_at\\\":\\\"2099-01-01T08:00:00+08:00\\\",\\\"reminder_type\\\":\\\"text\\\"}"
+                                }
+                              }]
+                            }
+                          }]
+                        }
+                        """, MediaType.APPLICATION_JSON));
+
+        server.expect(requestTo(CHAT_URL))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(request -> {
+                    JsonNode body = readBody(((MockClientHttpRequest) request).getBodyAsBytes());
+                    JsonNode messages = body.path("messages");
+                    JsonNode toolResult = objectMapper.readTree(
+                            messages.get(messages.size() - 1).path("content").asText());
+
+                    assertThat(messages.get(messages.size() - 1).path("tool_call_id").asText())
+                            .isEqualTo("call_reminder_1");
+                    assertThat(toolResult.path("success").asBoolean()).isTrue();
+                    assertThat(toolResult.path("reminder_type").asText()).isEqualTo("text");
+                })
+                .andRespond(withSuccess("""
+                        {
+                          "choices": [{
+                            "finish_reason": "stop",
+                            "message": {
+                              "role": "assistant",
+                              "content": "好的，已设置会议提醒。"
+                            }
+                          }]
+                        }
+                        """, MediaType.APPLICATION_JSON));
+
+        String reply = llmService.chat("user-2", "2099年1月1日上午8点提醒我参加会议");
+
+        assertThat(reply).isEqualTo("好的，已设置会议提醒。");
+        assertThat(reminderService.getDueReminders(Instant.parse("2100-01-01T00:00:00Z")))
+                .singleElement()
+                .satisfies(task -> {
+                    assertThat(task.userId()).isEqualTo("user-2");
+                    assertThat(task.content()).isEqualTo("参加会议");
+                });
         server.verify();
     }
 

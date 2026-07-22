@@ -9,6 +9,7 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -25,9 +26,11 @@ public class WeChatBotService {
     private final ImageGenerationService imageGenerationService;
     private final SpeechService speechService;
     private final FileSummaryService fileSummaryService;
+    private final ReminderService reminderService;
 
     private ILinkClient client;
     private volatile boolean running = true;
+    private volatile boolean loggedIn = false;
     private final Set<Long> processedMsgIds = ConcurrentHashMap.newKeySet();
 
     //初始化startBot避免阻塞线程，采用异步编程
@@ -55,11 +58,13 @@ public class WeChatBotService {
             log.info("=========================");
             //阻塞方法，等待扫码
             client.getLoginFuture().get();
+            loggedIn = true;
             log.info("ClawBot 登录成功，botId={}", client.getLoginContext().getBotId());
 
             pollMessages();
 
         } catch (Exception e) {
+            loggedIn = false;
             log.error("ClawBot 启动失败", e);
         }
     }
@@ -278,11 +283,43 @@ public class WeChatBotService {
         }
     }
 
+    /**
+     * 每 10 秒检查一次到期提醒。发送失败的任务会留在内存中，下一轮继续尝试。
+     */
+    @Scheduled(fixedDelayString = "${reminder.check-interval-ms:10000}")
+    public void sendDueReminders() {
+        if (!running || !loggedIn || client == null) {
+            return;
+        }
+
+        for (ReminderService.ReminderTask task : reminderService.getDueReminders()) {
+            try {
+                String reminderText = "⏰ 提醒：" + task.content();
+                if (task.type() == ReminderService.ReminderType.TEXT
+                        || task.type() == ReminderService.ReminderType.BOTH) {
+                    client.sendTextWithTyping(task.userId(), reminderText, 500);
+                }
+                if (task.type() == ReminderService.ReminderType.VOICE
+                        || task.type() == ReminderService.ReminderType.BOTH) {
+                    byte[] audioData = speechService.textToSpeech(task.userId(), reminderText);
+                    client.sendFile(task.userId(), audioData, "定时提醒.wav", "");
+                }
+
+                reminderService.markSent(task.id());
+                log.info("提醒已发送: id={}, userId={}, type={}",
+                        task.id(), task.userId(), task.type());
+            } catch (Exception e) {
+                log.error("发送提醒失败: id={}, userId={}", task.id(), task.userId(), e);
+            }
+        }
+    }
+
    //应用关闭，spring容器会自动调用所以标注了 @PreDestroy方法
     @PreDestroy
     public void destroy() {
         //轮询退出，不在接受信息
         running = false;
+        loggedIn = false;
         if (client != null) {
             //关闭于微信服务器的长连接，释放网络资源，防止连接泄露
             client.close();

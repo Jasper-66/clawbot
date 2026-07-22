@@ -1,5 +1,6 @@
 package com.example.clawbot.service;
 
+import com.example.clawbot.tool.ReminderTool;
 import com.example.clawbot.tool.WeatherTool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -20,6 +21,8 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
 
 @Slf4j
 @Service
@@ -28,11 +31,13 @@ public class    LlmService {
 
     private final RestTemplate restTemplate;
     private final WeatherTool weatherTool;
+    private final ReminderTool reminderTool;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private final ConcurrentHashMap<String, LinkedList<Map<String, Object>>> conversations = new ConcurrentHashMap<>();
     private static final int MAX_HISTORY = 10;
     private static final int MAX_TOOL_ROUNDS = 3;
+    private static final ZoneId DEFAULT_ZONE = ZoneId.of("Asia/Shanghai");
 
     @Value("${deepseek.api.key}")
     private String apiKey;
@@ -59,7 +64,7 @@ public class    LlmService {
         LinkedList<Map<String, Object>> history = conversations.computeIfAbsent(userId, k -> new LinkedList<>());
 
         List<Map<String, Object>> messages = new ArrayList<>();
-        messages.add(Map.of("role", "system", "content", SYSTEM_PROMPT));
+        messages.add(Map.of("role", "system", "content", buildSystemPrompt()));
 
         synchronized (history) {
             messages.addAll(history);
@@ -71,10 +76,13 @@ public class    LlmService {
         requestBody.put("messages", messages);
         requestBody.put("temperature", 0.7);
         requestBody.put("max_tokens", 1024);
-        requestBody.put("tools", List.of(weatherTool.getToolDefinition()));
+        requestBody.put("tools", List.of(
+                weatherTool.getToolDefinition(),
+                reminderTool.getToolDefinition()
+        ));
         requestBody.put("tool_choice", "auto");
 
-        String reply = callLlmWithTools(requestBody, messages);
+        String reply = callLlmWithTools(requestBody, messages, userId);
 
         synchronized (history) {
             history.add(Map.of("role", "user", "content", userMessage));
@@ -91,7 +99,8 @@ public class    LlmService {
      * 完成 Function Calling 闭环：请求模型、执行工具、回传结果，再获取最终回答。
      */
     private String callLlmWithTools(Map<String, Object> requestBody,
-                                    List<Map<String, Object>> messages) {
+                                    List<Map<String, Object>> messages,
+                                    String userId) {
         try {
             for (int toolRound = 0; toolRound <= MAX_TOOL_ROUNDS; toolRound++) {
                 JsonNode assistant = callChatCompletion(baseUrl, apiKey, requestBody);
@@ -115,7 +124,14 @@ public class    LlmService {
                     JsonNode function = toolCall.path("function");
                     String functionName = function.path("name").asText("");
                     String arguments = function.path("arguments").asText("{}");
-                    String toolResult = weatherTool.execute(functionName, arguments);
+                    String toolResult;
+                    if (weatherTool.getToolName().equals(functionName)) {
+                        toolResult = weatherTool.execute(functionName, arguments);
+                    } else if (reminderTool.getToolName().equals(functionName)) {
+                        toolResult = reminderTool.execute(functionName, arguments, userId);
+                    } else {
+                        toolResult = "工具调用失败：不支持的工具 " + functionName;
+                    }
                     log.info("执行工具: name={}, id={}", functionName, toolCallId);
 
                     messages.add(Map.of(
@@ -130,6 +146,14 @@ public class    LlmService {
             log.error("Function Calling 调用失败", e);
             return "抱歉，我暂时无法处理，请稍后再试。";
         }
+    }
+
+    private String buildSystemPrompt() {
+        String currentTime = OffsetDateTime.now(DEFAULT_ZONE).toString();
+        return SYSTEM_PROMPT
+                + " 当前时间是 " + currentTime + "，当前时区是 Asia/Shanghai。"
+                + " 创建提醒时必须把用户表达的时间转换为带时区的 ISO 8601 格式；"
+                + "如果用户没有提供明确时间，应先询问用户。";
     }
 
     private Map<String, Object> toAssistantToolCallMessage(JsonNode assistant) {
