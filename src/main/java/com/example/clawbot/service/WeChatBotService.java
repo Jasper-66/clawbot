@@ -224,6 +224,8 @@ public class WeChatBotService {
             log.info("语音识别结果: text=[{}], isImageGen={}",
                     recognizedText, isImageGenRequest(recognizedText));
 
+            // 路由分发：图片生成 / 闲聊（天气由 LLM function calling 处理）
+
             // 图片生成保留专用流程，其余文本由 LLM 决定是否调用工具。
             if (isImageGenRequest(recognizedText)) {
                 handleImageGeneration(fromUser, recognizedText);

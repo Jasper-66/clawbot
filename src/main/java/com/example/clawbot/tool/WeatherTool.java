@@ -4,6 +4,7 @@ import com.example.clawbot.service.WeatherService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -12,38 +13,38 @@ import java.util.Map;
 /**
  * 大模型负责选择工具和生成参数，WeatherService 负责执行真实查询。
  */
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class WeatherTool {
 
-    public static final String NAME = "get_current_weather";
-    private static final int MAX_CITY_LENGTH = 64;
-
     private final WeatherService weatherService;
-    private final ObjectMapper objectMapper;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
-    /**
-     * 返回 OpenAI 兼容的 Function Calling 工具定义
-     */
-    public Map<String, Object> definition() {
-        Map<String, Object> parameters = Map.of(
-                "type", "object",
-                "properties", Map.of(
-                        "city", Map.of(
-                                "type", "string",
-                                "description", "要查询的城市名称，例如：杭州、北京市、上海"
-                        )
-                ),
-                "required", List.of("city"),
-                "additionalProperties", false
-        );
+    private static final String NAME = "get_weather";
+    private static final int MAX_CITY_LENGTH = 50;
+    private static final String DESCRIPTION = "查询指定城市的实时天气信息，包括天气状况、温度和更新时间。当用户询问某个城市的天气时使用此工具。";
 
+    public String getToolName() {
+        return NAME;
+    }
+
+    public Map<String, Object> getToolDefinition() {
         return Map.of(
                 "type", "function",
                 "function", Map.of(
                         "name", NAME,
-                        "description", "查询指定城市的实时天气、气温和数据更新时间。用户没有提供城市时，应先询问城市。",
-                        "parameters", parameters
+                        "description", DESCRIPTION,
+                        "parameters", Map.of(
+                                "type", "object",
+                                "properties", Map.of(
+                                        "city", Map.of(
+                                                "type", "string",
+                                                "description", "城市名称，例如：北京、上海、深圳、杭州、成都、东京、纽约等"
+                                        )
+                                ),
+                                "required", List.of("city")
+                        )
                 )
         );
     }
@@ -65,8 +66,10 @@ public class WeatherTool {
             if (city.length() > MAX_CITY_LENGTH) {
                 return "工具调用失败：city 参数过长";
             }
+            log.info("执行天气工具: city={}", city);
             return weatherService.getWeather(city);
         } catch (Exception e) {
+            log.error("天气工具执行失败: {}", e.getMessage());
             return "工具调用失败：arguments 不是有效的 JSON";
         }
     }
