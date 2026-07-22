@@ -3,6 +3,7 @@ package com.example.clawbot.service;
 import com.example.clawbot.tool.GeocodeTool;
 import com.example.clawbot.tool.PlanRouteTool;
 import com.example.clawbot.tool.SearchNearbyTool;
+import com.example.clawbot.tool.TextToSpeechTool;
 import com.example.clawbot.tool.WeatherTool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -34,6 +35,7 @@ public class LlmService {
     private final GeocodeTool geocodeTool;
     private final SearchNearbyTool searchNearbyTool;
     private final PlanRouteTool planRouteTool;
+    private final TextToSpeechTool textToSpeechTool;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private final ConcurrentHashMap<String, LinkedList<Map<String, Object>>> conversations = new ConcurrentHashMap<>();
@@ -59,7 +61,8 @@ public class LlmService {
     private String visionModel;
 
     private static final String SYSTEM_PROMPT =
-            "你是一个友好的微信助手，请用简洁、自然的中文回答用户的问题。回答尽量控制在200字以内。";
+            "你是一个友好的微信助手，请用简洁、自然的中文回答用户的问题。回答尽量控制在200字以内。\n"
+                    + "如果调用了 text_to_speech 工具生成了语音，请务必在回复中保留 [audio:工具返回的file_path] 标记，以便系统发送给用户语音消息。";
 
     public String chat(String userId, String userMessage) {
         LinkedList<Map<String, Object>> history = conversations.computeIfAbsent(userId, k -> new LinkedList<>());
@@ -81,7 +84,8 @@ public class LlmService {
                 weatherTool.getToolDefinition(),
                 geocodeTool.getToolDefinition(),
                 searchNearbyTool.getToolDefinition(),
-                planRouteTool.getToolDefinition()
+                planRouteTool.getToolDefinition(),
+                textToSpeechTool.getToolDefinition()
         ));
         requestBody.put("tool_choice", "auto");
 
@@ -155,6 +159,9 @@ public class LlmService {
         }
         if (planRouteTool.getToolName().equals(functionName)) {
             return planRouteTool.execute(functionName, arguments);
+        }
+        if (textToSpeechTool.getToolName().equals(functionName)) {
+            return textToSpeechTool.execute(functionName, arguments);
         }
         return "工具调用失败：未找到工具 " + functionName;
     }

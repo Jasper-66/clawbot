@@ -111,7 +111,8 @@ public class WeChatBotService {
                 } else if (isImageGenRequest(text)) {
                     handleImageGeneration(fromUser, text);
                 } else {
-                    sendReply(fromUser, llmService.chat(fromUser, text));
+                    String reply = llmService.chat(fromUser, text);
+                    handleLlmReply(fromUser, reply);
                 }
             } else if (item.getImage_item() != null) {
                 log.info("收到图片 from={}", fromUser);
@@ -141,6 +142,46 @@ public class WeChatBotService {
         } catch (Exception e) {
             log.error("发送消息失败", e);
         }
+    }
+
+    /**
+     * LLM 回复处理：识别 [audio:file_path] 标记，若存在则发送语音消息；否则作为普通文本发送。
+     */
+    private void handleLlmReply(String fromUser, String reply) {
+        if (reply == null || reply.isEmpty()) {
+            return;
+        }
+        // 匹配 [audio:/path/to/file.wav] 标记
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("\\[audio:(.+?)]")
+                .matcher(reply);
+        if (matcher.find()) {
+            String audioPath = matcher.group(1);
+            java.io.File audioFile = new java.io.File(audioPath);
+            if (audioFile.exists() && audioFile.isFile()) {
+                try {
+                    byte[] audioBytes = java.nio.file.Files.readAllBytes(audioFile.toPath());
+                    client.sendFile(fromUser, audioBytes, "语音回复.wav", "");
+                    log.info("LLM 触发的语音已发送: path={}, size={} bytes", audioPath, audioBytes.length);
+                    // 清理掉音频标记后，把剩余文字一起发出去
+                    String remaining = reply.replace(matcher.group(), "").trim();
+                    if (!remaining.isEmpty()) {
+                        sendReply(fromUser, remaining);
+                    }
+                    // 用完删除缓存文件
+                    try {
+                        audioFile.delete();
+                    } catch (Exception ignored) {
+                    }
+                    return;
+                } catch (Exception e) {
+                    log.error("读取或发送 LLM 触发的语音失败: path={}", audioPath, e);
+                }
+            } else {
+                log.warn("LLM 标记的音频文件不存在: path={}", audioPath);
+            }
+        }
+        sendReply(fromUser, reply);
     }
 
     private boolean isImageGenRequest(String text) {
@@ -231,9 +272,7 @@ public class WeChatBotService {
                 handleImageGeneration(fromUser, recognizedText);
             } else {
                 String llmReply = llmService.chat(fromUser, recognizedText);
-                byte[] replyAudio = speechService.textToSpeech(fromUser, llmReply);
-                client.sendFile(fromUser, replyAudio, "语音回复.wav", "");
-                log.info("语音文件已发送给 {}", fromUser);
+                handleLlmReply(fromUser, llmReply);
             }
 
         } catch (Exception e) {
