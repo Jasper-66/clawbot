@@ -16,29 +16,110 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * 微信机器人核心服务 — 系统的"神经中枢"。
+ *
+ * <p>作为消息总线，负责微信登录、消息轮询、消息路由和回复发送。
+ * 根据消息类型（文本、图片、语音、文件）将消息分发到对应的业务服务处理。</p>
+ *
+ * <h3>完整消息处理流程</h3>
+ * <pre>
+ * 微信服务器
+ *   ↓ ILinkClient.getUpdates()（每 2 秒轮询）
+ * 消息去重（processedMsgIds Set）
+ *   ↓
+ * WeChatBotService.handleMessage()
+ *   ├── 文本消息（TextItem）
+ *   │     ├── 音色切换命令 → SpeechService.setVoice() / getAvailableVoices()
+ *   │     ├── TTS 请求（朗读/语音说...）→ SpeechService.textToSpeech() → 发送 .wav
+ *   │     ├── 图片生成请求（生成图片/画一个...）→ ImageGenerationService.generateImage()
+ *   │     └── 其他文本 → LlmService.chat() → handleLlmReply()（检测 [audio:...] 标记）
+ *   ├── 图片消息（ImageItem）→ 下载图片 → LlmService.chatWithImage()
+ *   ├── 语音消息（VoiceItem）→ 下载语音 → SpeechService.speechToText() → 识别文本 → 递归路由为文本
+ *   └── 文件消息（FileItem）→ 下载文件 → FileSummaryService.summarizeFile()
+ * </pre>
+ *
+ * <h3>关键词优先级</h3>
+ * <p>文本消息中各关键词检测的顺序决定了实际处理行为：</p>
+ * <ol>
+ *   <li>音色命令（最高优先级）— "切换音色"、"音色列表" 等</li>
+ *   <li>TTS 请求 — "朗读"、"读一下"、"语音说" 等前缀</li>
+ *   <li>图片生成 — "生成图片"、"画一个" 等关键词</li>
+ *   <li>LLM 对话（兜底）— 以上均不匹配的文本</li>
+ * </ol>
+ *
+ * <h3>线程模型</h3>
+ * <p>消息轮询在单个守护线程中运行（通过 {@link CompletableFuture#runAsync} 启动），
+ * 每条消息同步处理。对于耗时操作（如图片生成、文件总结），不额外创建线程 —
+ * 消息处理期间轮询线程阻塞，意味着同时间段的新消息会在队列中等待。</p>
+ *
+ * @see com.example.clawbot.service.LlmService
+ * @see com.example.clawbot.service.SpeechService
+ * @see com.example.clawbot.service.FileSummaryService
+ * @see com.example.clawbot.service.ImageGenerationService
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class WeChatBotService {
 
+    /** LLM 对话服务 — 处理文本聊天和图片识别 */
     private final LlmService llmService;
+
+    /** 图片生成服务 — 根据文本描述通过 AI 生成图片 */
     private final ImageGenerationService imageGenerationService;
+
+    /** 语音服务 — TTS（文字→语音）和 ASR（语音→文字） */
     private final SpeechService speechService;
+
+    /** 文件总结服务 — 提取文件内容并通过 LLM 生成摘要 */
     private final FileSummaryService fileSummaryService;
 
+    /** ILink 微信客户端 — 底层 SDK，负责与微信服务器通信 */
     private ILinkClient client;
+
+    /** 轮询运行标志，{@link #destroy()} 中设为 false 以停止轮询循环 */
     private volatile boolean running = true;
+
+    /**
+     * 已处理消息 ID 集合，用于消息去重。
+     *
+     * <p>使用 {@link ConcurrentHashMap#newKeySet()} 创建线程安全集合。
+     * 微信可能在网络重试时推送重复消息，通过 Set 的 add 方法（返回 false 表示已存在）
+     * 确保每条消息只处理一次。集合大小超过 500 时自动清空，防止内存泄漏。</p>
+     */
     private final Set<Long> processedMsgIds = ConcurrentHashMap.newKeySet();
 
-    //初始化startBot避免阻塞线程，采用异步编程
+    /**
+     * 应用启动钩子 — Spring 容器初始化后自动调用。
+     *
+     * <p>通过 {@link PostConstruct} 注解触发。采用异步方式（{@link CompletableFuture#runAsync}）
+     * 启动微信登录流程，避免阻塞 Spring 启动线程。
+     * 如果登录失败（如网络不通、二维码过期），错误仅记录日志，不影响应用其他功能。</p>
+     */
     @PostConstruct
     public void init() {
         CompletableFuture.runAsync(this::startBot);
     }
 
-    //构建ilink客户端
+    /**
+     * 构建 ILink 客户端并执行微信登录流程。
+     *
+     * <p>完整流程：</p>
+     * <ol>
+     *   <li>构建 ILinkClient（配置超时 35s、HTTP 重试 3 次、心跳启用）</li>
+     *   <li>调用 {@code client.executeLogin()} 获取登录二维码（文本形式）</li>
+     *   <li>将二维码输出到日志，由运维人员扫码授权</li>
+     *   <li>调用 {@code client.getLoginFuture().get()} 阻塞等待扫码完成</li>
+     *   <li>登录成功后立即启动消息轮询</li>
+     * </ol>
+     *
+     * <p>登录过程是阻塞的 — 如果无人扫码，应用将一直停留在登录等待状态。
+     * 这在开发/测试环境是合理的，生产环境建议增加超时和重登录机制。</p>
+     */
     private void startBot() {
         try {
+            // 构建客户端：配置连接超时、读超时、重试次数、心跳
             client = ILinkClient.builder()
                     .config(ILinkConfig.builder()
                             .connectTimeoutMs(35000)
@@ -47,36 +128,58 @@ public class WeChatBotService {
                             .heartbeatEnabled(true)
                             .build())
                     .build();
-           //获取登录二维码
+
+            // 获取登录二维码（文本形式，可在终端/日志中扫码）
             String qrContent = client.executeLogin();
             log.info("===== 微信机器人登录 =====");
             log.info("请扫描以下二维码登录 ClawBot：");
             log.info(qrContent);
             log.info("=========================");
-            //阻塞方法，等待扫码
+
+            // 阻塞等待用户扫码登录
             client.getLoginFuture().get();
             log.info("ClawBot 登录成功，botId={}", client.getLoginContext().getBotId());
 
+            // 开始轮询消息
             pollMessages();
 
         } catch (Exception e) {
             log.error("ClawBot 启动失败", e);
         }
     }
- //消息轮询模式
+
+    /**
+     * 消息轮询主循环 — 每 2 秒拉取一次微信消息。
+     *
+     * <p>循环体：</p>
+     * <ol>
+     *   <li>调用 {@code client.getUpdates()} 拉取新消息列表</li>
+     *   <li>遍历每条消息：去重检查 → 分发到 {@link #handleMessage}</li>
+     *   <li>去重集合超过 500 条时清空（简单策略，防止无限增长）</li>
+     *   <li>{@code Thread.sleep(2000)} 等待 2 秒后下一轮</li>
+     * </ol>
+     *
+     * <p><b>退出条件</b>：{@code running == false}（应用关闭时由 {@link #destroy()} 设置）
+     * 或当前线程被中断。</p>
+     *
+     * <p><b>去重策略</b>：微信可能因网络问题重发消息，使用 message_id 去重。
+     * 集合上限 500 是简单方案 — 超过后全量清空意味着旧的重复消息可能被再次处理，
+     * 但对用户体验影响极小（微信重发窗口远小于 500 条消息的到达时间）。</p>
+     */
     private void pollMessages() {
         while (running) {
             try {
-                //主动向微信服务器发起请求，获取最新到达的消息列表。
+                // 主动向微信服务器发起 HTTP 请求，获取最新消息列表
                 List<WeixinMessage> messages = client.getUpdates();
                 for (WeixinMessage msg : messages) {
                     Long msgId = msg.getMessage_id();
+                    // 去重：add 返回 false 表示消息已处理过
                     if (msgId != null && !processedMsgIds.add(msgId)) {
                         continue;
                     }
                     handleMessage(msg);
                 }
-                // 防止 Set 无限增长，保留最近 500 条
+                // 防止 Set 无限增长：超过 500 条清空
                 if (processedMsgIds.size() > 500) {
                     processedMsgIds.clear();
                 }
@@ -85,6 +188,8 @@ public class WeChatBotService {
                     log.error("消息轮询异常", e);
                 }
             }
+
+            // 轮询间隔：2 秒
             try {
                 Thread.sleep(2000);
             } catch (InterruptedException e) {
@@ -94,26 +199,49 @@ public class WeChatBotService {
         }
     }
 
+    /**
+     * 消息分发处理器 — 根据消息子项类型路由到对应处理方法。
+     *
+     * <p>一个 WeixinMessage 可能包含多个 Item（图文混排消息），
+     * 每个 Item 按其类型（文本/图片/语音/文件）分别处理。</p>
+     *
+     * <p><b>文本消息关键词优先级</b>（按检查顺序）：</p>
+     * <ol>
+     *   <li>音色命令（"切换音色"、"音色列表" 等）</li>
+     *   <li>TTS 请求（"朗读"、"读一下"、"语音说" 等）</li>
+     *   <li>图片生成请求（"生成图片"、"画一个" 等）</li>
+     *   <li>LLM 对话（以上均不匹配的文本）</li>
+     * </ol>
+     *
+     * @param msg 微信消息对象（包含发送者 ID 和消息子项列表）
+     */
     private void handleMessage(WeixinMessage msg) {
         String fromUser = msg.getFrom_user_id();
         if (msg.getItem_list() == null) return;
-        //forEach循环加lambda表达式判断信息是否为文本
+
         msg.getItem_list().forEach(item -> {
             if (item.getText_item() != null) {
+                // ── 文本消息 ──
                 String text = item.getText_item().getText();
                 log.info("收到文本 from={}, text={}", fromUser, text);
 
-                //匹配关键词 — 音色切换优先级最高
+                // 按优先级依次检查关键词
                 if (isVoiceCommand(text)) {
+                    // 音色切换优先级最高
                     handleVoiceCommand(fromUser, text);
                 } else if (isTtsRequest(text)) {
+                    // TTS 请求："朗读 xxx"
                     handleTts(fromUser, extractTtsText(text));
                 } else if (isImageGenRequest(text)) {
+                    // 图片生成："画一个 xxx"
                     handleImageGeneration(fromUser, text);
                 } else {
-                    sendReply(fromUser, llmService.chat(fromUser, text));
+                    // 兜底：LLM 对话
+                    String reply = llmService.chat(fromUser, text);
+                    handleLlmReply(fromUser, reply);
                 }
             } else if (item.getImage_item() != null) {
+                // ── 图片消息 ──
                 log.info("收到图片 from={}", fromUser);
                 try {
                     byte[] imageBytes = client.downloadImageFromMessageItem(item);
@@ -123,10 +251,12 @@ public class WeChatBotService {
                     sendReply(fromUser, "抱歉，图片处理失败，请稍后再试。");
                 }
             } else if (item.getVoice_item() != null) {
+                // ── 语音消息 ──
                 log.info("收到语音 from={}, playtime={}s",
                         fromUser, item.getVoice_item().getPlaytime());
                 handleVoiceMessage(fromUser, item);
             } else if (item.getFile_item() != null) {
+                // ── 文件消息 ──
                 FileItem fileItem = item.getFile_item();
                 log.info("收到文件 from={}, fileName={}", fromUser, fileItem.getFile_name());
                 handleFileMessage(fromUser, item, fileItem);
@@ -134,7 +264,18 @@ public class WeChatBotService {
         });
     }
 
-    //拟人化优化
+    /**
+     * 发送文本回复，带有"正在输入..."状态模拟。
+     *
+     * <p>调用 {@code client.sendTextWithTyping} 在发送文本前先显示
+     * "正在输入..."状态 1500 毫秒，使机器人回复更拟人化。</p>
+     *
+     * <p>发送异常被静默吞掉（仅记录日志），因为消息发送失败不应导致
+     * 消息处理流程中断 — 后续消息仍需继续处理。</p>
+     *
+     * @param toUser 目标用户 ID（微信的 to_user_id）
+     * @param reply  回复文本内容
+     */
     private void sendReply(String toUser, String reply) {
         try {
             client.sendTextWithTyping(toUser, reply, 1500);
@@ -143,6 +284,76 @@ public class WeChatBotService {
         }
     }
 
+    /**
+     * 处理 LLM 回复 — 识别并发送内嵌的语音标记。
+     *
+     * <p>LLM 可能在回复中嵌入 {@code [audio:/path/to/file.wav]} 标记
+     * （由 TextToSpeechTool 生成）。此方法检测标记并：</p>
+     * <ol>
+     *   <li>读取标记指向的 WAV 文件</li>
+     *   <li>通过 ILink SDK 发送语音消息</li>
+     *   <li>移除标记后，将剩余文字作为文本发送</li>
+     *   <li>发送成功后删除临时音频文件</li>
+     * </ol>
+     *
+     * <p>如果没有音频标记，则作为普通文本消息发送。</p>
+     *
+     * @param fromUser 目标用户 ID
+     * @param reply    LLM 返回的完整回复文本（可能包含 [audio:...] 标记）
+     */
+    private void handleLlmReply(String fromUser, String reply) {
+        if (reply == null || reply.isEmpty()) {
+            return;
+        }
+        // 使用正则匹配 [audio:文件路径] 标记
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("\\[audio:(.+?)]")
+                .matcher(reply);
+        if (matcher.find()) {
+            String audioPath = matcher.group(1);
+            java.io.File audioFile = new java.io.File(audioPath);
+            if (audioFile.exists() && audioFile.isFile()) {
+                try {
+                    // 读取音频文件并发送语音消息
+                    byte[] audioBytes = java.nio.file.Files.readAllBytes(audioFile.toPath());
+                    client.sendFile(fromUser, audioBytes, "语音回复.wav", "");
+                    log.info("LLM 触发的语音已发送: path={}, size={} bytes", audioPath, audioBytes.length);
+
+                    // 移除音频标记，将剩余文本作为文字消息发送
+                    String remaining = reply.replace(matcher.group(), "").trim();
+                    if (!remaining.isEmpty()) {
+                        sendReply(fromUser, remaining);
+                    }
+
+                    // 清理临时文件
+                    try {
+                        audioFile.delete();
+                    } catch (Exception ignored) {
+                    }
+                    return;
+                } catch (Exception e) {
+                    log.error("读取或发送 LLM 触发的语音失败: path={}", audioPath, e);
+                }
+            } else {
+                log.warn("LLM 标记的音频文件不存在: path={}", audioPath);
+            }
+        }
+        // 无音频标记或发送失败 → 作为普通文本发送
+        sendReply(fromUser, reply);
+    }
+
+    /**
+     * 判断用户文本是否为图片生成请求。
+     *
+     * <p>通过关键词匹配识别用户意图，支持多种同义表达。
+     * 匹配策略：先检查已知的完整短语，再检查组合条件。</p>
+     *
+     * <p>触发词包括：生成图片/图像/一张/个图、画一个/一张/个/只/幅、
+     * 帮我画、做个图/一张图、来一张/张 等。</p>
+     *
+     * @param text 用户输入文本
+     * @return true 如果匹配图片生成请求模式
+     */
     private boolean isImageGenRequest(String text) {
         if (text.contains("生成图片") || text.contains("生成图像") || text.contains("生成一张")
                 || text.contains("生成个图") || text.contains("图片生成") || text.contains("图像生成")
@@ -152,10 +363,20 @@ public class WeChatBotService {
                 || text.contains("来一张") || text.contains("来张")) {
             return true;
         }
+        // 组合条件：（生成 或 画）且 （图片 或 图像 或 照片）
         return (text.contains("生成") || text.contains("画"))
                 && (text.contains("图片") || text.contains("图像") || text.contains("照片"));
     }
 
+    /**
+     * 处理图片生成请求。
+     *
+     * <p>流程：发送"正在生成"提示 → 调用 AI 生成图片 → 将图片发送给用户。
+     * 生成失败时发送错误提示文本。</p>
+     *
+     * @param fromUser 请求用户 ID
+     * @param text     用户原始消息（从中提取图生文 prompt）
+     */
     private void handleImageGeneration(String fromUser, String text) {
         try {
             client.sendTextWithTyping(fromUser, "正在为你生成图片，请稍候...", 500);
@@ -178,6 +399,18 @@ public class WeChatBotService {
         }
     }
 
+    /**
+     * 从用户消息中提取图片生成提示词。
+     *
+     * <p>移除所有触发关键词（如"生成图片"、"画一个"等），保留用户真正想要
+     * 生成的描述内容。如果移除后为空（用户只发了关键词），则使用原始文本。</p>
+     *
+     * <p>注意：正则替换可能过度清理（如"画一只猫生成图片"），
+     * 但对大多数正常输入效果良好。</p>
+     *
+     * @param text 用户原始消息
+     * @return 提取后的图片生成提示词
+     */
     private String extractImagePrompt(String text) {
         String prompt = text
                 .replaceAll("生成图片|生成图像|生成一张|生成个图|画一个|画一张|画个|画一只|画只|画幅|帮我画|图片生成|图像生成|做一张图|做个图|来一张|来张|生成|图片|图像|照片|图", "")
@@ -185,21 +418,46 @@ public class WeChatBotService {
         return prompt.isEmpty() ? text : prompt;
     }
 
-    //检查字符串是否以指定字符串开始 return true/false
+    /**
+     * 判断用户文本是否为 TTS（文字转语音）请求。
+     *
+     * <p>通过前缀匹配识别：以"朗读"、"读一下"、"语音说"、"语音播报"、
+     * "转语音"、"语音回复"开头的消息视为 TTS 请求。</p>
+     *
+     * @param text 用户输入文本
+     * @return true 如果是 TTS 请求
+     */
     private boolean isTtsRequest(String text) {
         return text.startsWith("朗读") || text.startsWith("读一下")
                 || text.startsWith("语音说") || text.startsWith("语音播报")
                 || text.startsWith("转语音") || text.startsWith("语音回复");
     }
 
-    //正则替换，将开头部分去掉
+    /**
+     * 从 TTS 请求中提取需要朗读的文本内容。
+     *
+     * <p>移除前缀关键词（"朗读"、"读一下"等），返回剩余文本。
+     * 使用正则 {@code replaceFirst} 确保只移除第一个匹配的前缀。</p>
+     *
+     * @param text 用户原始消息（如 "朗读今天天气真好"）
+     * @return 去除 TTS 前缀后的待朗读文本（如 "今天天气真好"）
+     */
     private String extractTtsText(String text) {
         return text.replaceFirst("^(朗读|读一下|语音说|语音播报|转语音|语音回复)", "").trim();
     }
 
+    /**
+     * 处理 TTS 请求：文字 → 语音 → 发送。
+     *
+     * <p>流程：发送"正在生成"提示 → 调用 SpeechService TTS API 生成 WAV 音频
+     * → 通过 ILink SDK 发送语音文件。</p>
+     *
+     * @param fromUser   请求用户 ID
+     * @param textToRead 需要朗读的文本（已去除前缀）
+     */
     private void handleTts(String fromUser, String textToRead) {
         try {
-            //带输入态发送文本
+            // 发送输入状态提示
             client.sendTextWithTyping(fromUser, "正在生成语音...", 500);
             byte[] audioData = speechService.textToSpeech(fromUser, textToRead);
             client.sendFile(fromUser, audioData, "语音播报.wav", "");
@@ -210,29 +468,56 @@ public class WeChatBotService {
         }
     }
 
+    /**
+     * 处理语音消息 — 下载 → ASR 识别 → 路由识别文本。
+     *
+     * <p>完整流程：</p>
+     * <ol>
+     *   <li>下载语音文件（通过 ILink SDK）</li>
+     *   <li>根据微信编码类型判断文件格式：
+     *     <ul>
+     *       <li>encode_type=4 → SILK（需要转码）</li>
+     *       <li>encode_type=0 → WAV（无需转码）</li>
+     *       <li>其他 → 默认为 AMR</li>
+     *     </ul>
+     *   </li>
+     *   <li>调用 ASR 服务将语音转为文本</li>
+     *   <li>对识别文本判断是否为图片生成请求，相应路由</li>
+     *   <li>不是图片生成则进入 LLM 对话</li>
+     * </ol>
+     *
+     * @param fromUser 发送用户 ID
+     * @param item     消息子项（包含语音元数据）
+     */
     private void handleVoiceMessage(String fromUser, MessageItem item) {
         try {
             client.sendTextWithTyping(fromUser, "正在识别语音，请稍候...", 500);
 
+            // 下载语音文件
             byte[] voiceBytes = client.downloadVoiceFromMessageItem(item);
-            String fileName = "voice.amr";
-            Integer encodeType = item.getVoice_item().getEncode_type();
-            if (encodeType != null && encodeType == 4) fileName = "voice.sil";
-            else if (encodeType != null && encodeType == 0) fileName = "voice.wav";
 
+            // 根据微信编码类型确定文件格式
+            String fileName = "voice.amr";  // 默认 AMR
+            Integer encodeType = item.getVoice_item().getEncode_type();
+            if (encodeType != null && encodeType == 4) fileName = "voice.sil";   // SILK
+            else if (encodeType != null && encodeType == 0) fileName = "voice.wav"; // WAV
+
+            // ASR 识别
             String recognizedText = speechService.speechToText(voiceBytes, fileName);
             log.info("语音识别结果: text=[{}], isImageGen={}",
                     recognizedText, isImageGenRequest(recognizedText));
 
+<<<<<<< HEAD
             // 路由分发：图片生成 / 闲聊（天气由 LLM function calling 处理）
             // 图片生成保留专用流程，其余文本由 LLM 决定是否调用工具。
+=======
+            // 根据识别结果路由：图片生成 或 LLM 对话
+>>>>>>> f5994d030b0e3eb78941bf38030cc3b2615bb91a
             if (isImageGenRequest(recognizedText)) {
                 handleImageGeneration(fromUser, recognizedText);
             } else {
                 String llmReply = llmService.chat(fromUser, recognizedText);
-                byte[] replyAudio = speechService.textToSpeech(fromUser, llmReply);
-                client.sendFile(fromUser, replyAudio, "语音回复.wav", "");
-                log.info("语音文件已发送给 {}", fromUser);
+                handleLlmReply(fromUser, llmReply);
             }
 
         } catch (Exception e) {
@@ -245,6 +530,16 @@ public class WeChatBotService {
         }
     }
 
+    /**
+     * 处理文件消息 — 下载 → 提取文本 → LLM 摘要。
+     *
+     * <p>支持 PDF、DOCX、XLSX、PPTX、TXT 等常见办公文档格式。
+     * 文件先由 WeChatBotService 下载，再委托给 FileSummaryService 处理。</p>
+     *
+     * @param fromUser 发送用户 ID
+     * @param item     消息子项（包含文件二进制数据）
+     * @param fileItem 文件元信息（文件名等）
+     */
     private void handleFileMessage(String fromUser, MessageItem item, FileItem fileItem) {
         try {
             client.sendTextWithTyping(fromUser, "正在查看文件，请稍候...", 500);
@@ -257,7 +552,19 @@ public class WeChatBotService {
         }
     }
 
-    // 音色切换命令检测
+    /**
+     * 检测用户文本是否为音色相关命令。
+     *
+     * <p>触发条件（满足之一即视为音色命令）：</p>
+     * <ul>
+     *   <li>以 "切换音色"、"设置音色"、"换成音色"、"更换音色" 开头</li>
+     *   <li>以 "音色" 开头（如 "音色Cherry"）</li>
+     *   <li>精确匹配 "音色列表"、"有哪些音色"、"当前音色"、"我的音色"</li>
+     * </ul>
+     *
+     * @param text 用户输入文本
+     * @return true 如果是音色相关命令
+     */
     private boolean isVoiceCommand(String text) {
         return text.startsWith("切换音色") || text.startsWith("设置音色")
                 || text.startsWith("换成音色") || text.startsWith("更换音色")
@@ -266,24 +573,48 @@ public class WeChatBotService {
                 || text.startsWith("音色");
     }
 
+    /**
+     * 处理音色相关命令。
+     *
+     * <p>支持的命令：</p>
+     * <ul>
+     *   <li>"音色列表" / "有哪些音色" → 列出所有 15 种音色及描述</li>
+     *   <li>"当前音色" / "我的音色" → 显示当前使用的音色</li>
+     *   <li>"切换音色Cherry" / "音色芊悦" → 切换音色（自动匹配中英文名）</li>
+     * </ul>
+     *
+     * @param fromUser 请求用户 ID
+     * @param text     用户原始消息
+     */
     private void handleVoiceCommand(String fromUser, String text) {
         if (text.equals("音色列表") || text.equals("有哪些音色")) {
             sendReply(fromUser, speechService.getAvailableVoices());
         } else if (text.equals("当前音色") || text.equals("我的音色")) {
             sendReply(fromUser, "当前音色：" + speechService.getCurrentVoice(fromUser));
         } else {
+            // 提取音色名称并切换："切换音色Cherry" → "Cherry"
             String voiceName = text.replaceFirst("^(切换音色|设置音色|换成音色|更换音色|音色)", "").trim();
             sendReply(fromUser, speechService.setVoice(fromUser, voiceName));
         }
     }
 
-   //应用关闭，spring容器会自动调用所以标注了 @PreDestroy方法
+    /**
+     * 应用关闭钩子 — Spring 容器销毁前自动调用。
+     *
+     * <p>通过 {@link PreDestroy} 注解触发。执行以下清理操作：</p>
+     * <ol>
+     *   <li>设置 {@code running = false} 通知轮询线程退出循环</li>
+     *   <li>调用 {@code client.close()} 关闭与微信服务器的长连接</li>
+     *   <li>释放网络资源（TCP 连接、心跳线程等）</li>
+     * </ol>
+     *
+     * <p>注意：如果轮询线程正在 {@code Thread.sleep(2000)} 中，最多需要 2 秒
+     * 才能检测到 {@code running} 变更并退出。</p>
+     */
     @PreDestroy
     public void destroy() {
-        //轮询退出，不在接受信息
         running = false;
         if (client != null) {
-            //关闭于微信服务器的长连接，释放网络资源，防止连接泄露
             client.close();
             log.info("ClawBot 已关闭");
         }
