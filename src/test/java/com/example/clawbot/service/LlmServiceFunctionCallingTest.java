@@ -269,6 +269,57 @@ class LlmServiceFunctionCallingTest {
         server.verify();
     }
 
+    @Test
+    void shouldPassWechatUserIdToTextToSpeechTool() {
+        String arguments = "{\"text\":\"你好\"}";
+        when(textToSpeechTool.execute("text_to_speech", arguments, "voice-user"))
+                .thenReturn("""
+                        {"format":"wav","size":1024,"file_path":"D:\\\\audio_cache\\\\voice.wav"}
+                        """.trim());
+
+        server.expect(requestTo(CHAT_URL))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withSuccess("""
+                        {
+                          "choices": [{
+                            "finish_reason": "tool_calls",
+                            "message": {
+                              "role": "assistant",
+                              "content": null,
+                              "tool_calls": [{
+                                "id": "call_tts_1",
+                                "type": "function",
+                                "function": {
+                                  "name": "text_to_speech",
+                                  "arguments": "{\\"text\\":\\"你好\\"}"
+                                }
+                              }]
+                            }
+                          }]
+                        }
+                        """, MediaType.APPLICATION_JSON));
+
+        server.expect(requestTo(CHAT_URL))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withSuccess("""
+                        {
+                          "choices": [{
+                            "finish_reason": "stop",
+                            "message": {
+                              "role": "assistant",
+                              "content": "[audio:D:\\\\audio_cache\\\\voice.wav]"
+                            }
+                          }]
+                        }
+                        """, MediaType.APPLICATION_JSON));
+
+        String reply = llmService.chat("voice-user", "请用语音说你好");
+
+        assertThat(reply).isEqualTo("[audio:D:\\audio_cache\\voice.wav]");
+        verify(textToSpeechTool).execute("text_to_speech", arguments, "voice-user");
+        server.verify();
+    }
+
     /**
      * 将 HTTP 请求体字节数组解析为 Jackson JsonNode。
      *

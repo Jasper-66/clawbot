@@ -63,7 +63,7 @@ public class TextToSpeechTool {
      */
     private static final String DESCRIPTION = "将文字合成为 WAV 格式的语音。当用户希望听到某段文字的朗读、生成语音消息或音频内容时，使用此工具。生成的音频会保存到本地文件并返回路径。";
 
-    /** Function Calling 场景下的默认用户 ID（无微信会话上下文时使用） */
+    /** 无用户上下文时使用的兜底用户 ID */
     private static final String DEFAULT_USER_ID = "function_calling_user";
 
     /** 音频缓存目录名 */
@@ -125,9 +125,10 @@ public class TextToSpeechTool {
      *
      * @param functionName  工具名称（应为 "text_to_speech"）
      * @param argumentsJson LLM 生成的参数 JSON（如 {@code {"text":"你好世界"}}）
+     * @param userId        当前微信用户 ID，用于读取该用户选择的音色
      * @return 语音文件信息 JSON 字符串，或错误信息
      */
-    public String execute(String functionName, String argumentsJson) {
+    public String execute(String functionName, String argumentsJson, String userId) {
         if (!NAME.equals(functionName)) {
             return "工具调用失败：不支持的工具 " + functionName;
         }
@@ -144,7 +145,10 @@ public class TextToSpeechTool {
             }
 
             log.info("执行语音合成工具: textLength={}", text.length());
-            byte[] wavBytes = speechService.textToSpeech(DEFAULT_USER_ID, text);
+            String effectiveUserId = userId == null || userId.isBlank()
+                    ? DEFAULT_USER_ID
+                    : userId;
+            byte[] wavBytes = speechService.textToSpeech(effectiveUserId, text);
 
             if (wavBytes == null || wavBytes.length == 0) {
                 return "工具调用失败：语音合成返回为空";

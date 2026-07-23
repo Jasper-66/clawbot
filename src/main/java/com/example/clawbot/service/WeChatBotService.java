@@ -557,20 +557,26 @@ public class WeChatBotService {
      *
      * <p>触发条件（满足之一即视为音色命令）：</p>
      * <ul>
-     *   <li>以 "切换音色"、"设置音色"、"换成音色"、"更换音色" 开头</li>
-     *   <li>以 "音色" 开头（如 "音色Cherry"）</li>
-     *   <li>精确匹配 "音色列表"、"有哪些音色"、"当前音色"、"我的音色"</li>
+     *   <li>自然切换表达，如 "帮我换个声音"、"把声音换成Ethan"</li>
+     *   <li>指定音色表达，如 "使用Cherry音色"、"我想用芊悦的声音"</li>
+     *   <li>列表和查询表达，如 "有哪些声音"、"现在是什么音色"</li>
      * </ul>
      *
      * @param text 用户输入文本
      * @return true 如果是音色相关命令
      */
-    private boolean isVoiceCommand(String text) {
-        return text.startsWith("切换音色") || text.startsWith("设置音色")
-                || text.startsWith("换成音色") || text.startsWith("更换音色")
-                || text.equals("音色列表") || text.equals("有哪些音色")
-                || text.equals("当前音色") || text.equals("我的音色")
-                || text.startsWith("音色");
+    static boolean isVoiceCommand(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        String command = stripVoiceCommandPoliteness(text);
+        if (isVoiceListRequest(command) || isCurrentVoiceRequest(command)) {
+            return true;
+        }
+        return command.matches("^(切换|设置|更换|选择|换|改).*?(音色|声音).*$")
+                || command.matches("^(使用|用|换成|改成).+(音色|声音)$")
+                || command.matches("^(把)?(音色|声音).*(换成|改成|设置为|切换为).+$")
+                || command.matches("^(音色|声音)\\s*[:：]?\\s*\\S+$");
     }
 
     /**
@@ -578,24 +584,73 @@ public class WeChatBotService {
      *
      * <p>支持的命令：</p>
      * <ul>
-     *   <li>"音色列表" / "有哪些音色" → 列出所有 15 种音色及描述</li>
-     *   <li>"当前音色" / "我的音色" → 显示当前使用的音色</li>
-     *   <li>"切换音色Cherry" / "音色芊悦" → 切换音色（自动匹配中英文名）</li>
+     *   <li>"声音列表" / "支持哪些音色" → 列出所有 15 种音色及描述</li>
+     *   <li>"当前音色" / "现在是什么声音" → 显示当前使用的音色</li>
+     *   <li>"把声音换成Ethan" / "我想用芊悦的声音" → 切换音色</li>
+     *   <li>"帮我换个声音" → 未指定目标时先展示可选音色</li>
      * </ul>
      *
      * @param fromUser 请求用户 ID
      * @param text     用户原始消息
      */
     private void handleVoiceCommand(String fromUser, String text) {
-        if (text.equals("音色列表") || text.equals("有哪些音色")) {
+        String command = stripVoiceCommandPoliteness(text);
+        if (isVoiceListRequest(command)) {
             sendReply(fromUser, speechService.getAvailableVoices());
-        } else if (text.equals("当前音色") || text.equals("我的音色")) {
+        } else if (isCurrentVoiceRequest(command)) {
             sendReply(fromUser, "当前音色：" + speechService.getCurrentVoice(fromUser));
         } else {
-            // 提取音色名称并切换："切换音色Cherry" → "Cherry"
-            String voiceName = text.replaceFirst("^(切换音色|设置音色|换成音色|更换音色|音色)", "").trim();
+            String voiceName = extractVoiceName(command);
             sendReply(fromUser, speechService.setVoice(fromUser, voiceName));
         }
+    }
+
+    /**
+     * 判断用户是否正在询问可选音色。
+     */
+    private static boolean isVoiceListRequest(String text) {
+        return text.equals("音色列表") || text.equals("声音列表")
+                || text.equals("有哪些音色") || text.equals("有哪些声音")
+                || text.matches(".*(有哪些|有什么|支持哪些|可选哪些|可以用哪些).*(音色|声音).*")
+                || text.matches(".*(音色|声音).*(列表|有哪些|有什么|可选).*");
+    }
+
+    /**
+     * 判断用户是否正在查询当前音色。
+     */
+    private static boolean isCurrentVoiceRequest(String text) {
+        return text.equals("当前音色") || text.equals("我的音色")
+                || text.equals("当前声音") || text.equals("我的声音")
+                || text.matches(".*(当前|现在|正在|我的).*(音色|声音).*(什么|哪个|哪种).*")
+                || text.matches(".*(当前|现在|正在|我的).*(什么|哪个|哪种).*(音色|声音).*");
+    }
+
+    /**
+     * 从多种自然语言表达中提取音色名称。没有指定具体音色时返回空字符串。
+     */
+    static String extractVoiceName(String text) {
+        if (text == null) {
+            return "";
+        }
+        String voiceName = stripVoiceCommandPoliteness(text)
+                .replaceFirst("^(把)?(音色|声音)\\s*(切换|设置|更换|换|改)\\s*(为|成|到)?\\s*", "")
+                .replaceFirst("^(切换|设置|更换)\\s*(一下)?\\s*(音色|声音)\\s*(为|成|到)?\\s*", "")
+                .replaceFirst("^(换|改)\\s*(一个|个|一下)?\\s*(音色|声音)\\s*(为|成|到)?\\s*", "")
+                .replaceFirst("^(切换为|设置为|更换为|使用|选择|用|换成|改成)\\s*", "")
+                .replaceFirst("^(音色|声音)\\s*[:：]?\\s*", "")
+                .replaceFirst("\\s*的?\\s*(音色|声音)$", "")
+                .replaceAll("^[：:，,。\\s]+|[。！!，,\\s]+$", "")
+                .trim();
+        return voiceName.matches("^(一个|个|一下)$") ? "" : voiceName;
+    }
+
+    /**
+     * 去掉不影响指令含义的礼貌用语，便于后续统一解析。
+     */
+    private static String stripVoiceCommandPoliteness(String text) {
+        return text.trim()
+                .replaceFirst("^(请帮我|麻烦帮我|帮我|麻烦|我想|我要|给我|请)\\s*", "")
+                .trim();
     }
 
     /**

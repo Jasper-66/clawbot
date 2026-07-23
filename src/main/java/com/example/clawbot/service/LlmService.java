@@ -332,7 +332,7 @@ public class    LlmService {
             return planRouteTool.execute(functionName, arguments);
         }
         if (textToSpeechTool.getToolName().equals(functionName)) {
-            return textToSpeechTool.execute(functionName, arguments);
+            return textToSpeechTool.execute(functionName, arguments, userId);
         }
         if (reminderTool.getToolName().equals(functionName)) {
             return reminderTool.execute(functionName, arguments, userId);
