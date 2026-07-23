@@ -301,6 +301,16 @@ public class WeChatBotService {
      * @param fromUser 目标用户 ID
      * @param reply    LLM 返回的完整回复文本（可能包含 [audio:...] 标记）
      */
+/**
+     * 处理 LLM 回复 — 识别并发送内嵌的语音标记。
+     *
+     * <p>检测回复中的 {@code [audio:文件路径]} 标记，读取对应音频文件发送给用户。
+     * 如果标记指向的文件不存在（LLM 编造了路径），则尝试从回复文本中提取内容，
+     * 重新调用 TTS 生成语音作为兜底。</p>
+     *
+     * @param fromUser 目标用户 ID
+     * @param reply    LLM 回复文本（可能包含 [audio:...] 标记）
+     */
     private void handleLlmReply(String fromUser, String reply) {
         if (reply == null || reply.isEmpty()) {
             return;
@@ -311,6 +321,7 @@ public class WeChatBotService {
                 .matcher(reply);
         if (matcher.find()) {
             String audioPath = matcher.group(1);
+            String remainingText = reply.replace(matcher.group(), "").trim();
             java.io.File audioFile = new java.io.File(audioPath);
             if (audioFile.exists() && audioFile.isFile()) {
                 try {
@@ -319,10 +330,9 @@ public class WeChatBotService {
                     client.sendFile(fromUser, audioBytes, "语音回复.wav", "");
                     log.info("LLM 触发的语音已发送: path={}, size={} bytes", audioPath, audioBytes.length);
 
-                    // 移除音频标记，将剩余文本作为文字消息发送
-                    String remaining = reply.replace(matcher.group(), "").trim();
-                    if (!remaining.isEmpty()) {
-                        sendReply(fromUser, remaining);
+                    // 将剩余文本作为文字消息发送
+                    if (!remainingText.isEmpty()) {
+                        sendReply(fromUser, remainingText);
                     }
 
                     // 清理临时文件
@@ -336,6 +346,19 @@ public class WeChatBotService {
                 }
             } else {
                 log.warn("LLM 标记的音频文件不存在: path={}", audioPath);
+                // 兜底：文件不存在时，尝试从回复文本重新生成语音
+                if (!remainingText.isEmpty()) {
+                    try {
+                        log.info("尝试兜底生成语音: textLength={}", remainingText.length());
+                        client.sendTextWithTyping(fromUser, "正在生成语音...", 500);
+                        byte[] audioData = speechService.textToSpeech(fromUser, remainingText);
+                        client.sendFile(fromUser, audioData, "语音播报.wav", "");
+                        log.info("兜底语音已生成并发送: textLength={}", remainingText.length());
+                        return;
+                    } catch (Exception e) {
+                        log.error("兜底语音生成失败", e);
+                    }
+                }
             }
         }
         // 无音频标记或发送失败 → 作为普通文本发送
