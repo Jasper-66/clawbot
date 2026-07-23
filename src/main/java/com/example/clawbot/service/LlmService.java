@@ -4,6 +4,7 @@ import com.example.clawbot.tool.GeocodeTool;
 import com.example.clawbot.tool.PlanRouteTool;
 import com.example.clawbot.tool.ReminderTool;
 import com.example.clawbot.tool.SearchNearbyTool;
+import com.example.clawbot.tool.TarotTool;
 import com.example.clawbot.tool.TextToSpeechTool;
 import com.example.clawbot.tool.WeatherTool;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -29,66 +30,54 @@ import java.time.OffsetDateTime;
 import java.time.ZoneId;
 
 /**
- * 大语言模型（LLM）对话服务 — 系统的"大脑"。
+ * 大语言模型（LLM）对话服务。
  *
- * <p>提供两大核心能力：<b>文本对话</b>（含 Function Calling）和 <b>图片识别</b>（多模态 Vision）。
- * 通过 DeepSeek Chat API 进行文本对话，DashScope Vision API 进行图片分析。</p>
+ * <p>提供文本对话、图片识别两大核心能力，支持 Function Calling（工具调用）。</p>
  *
- * <h3>对话管理</h3>
- * <p>每个用户（以 userId 区分）独立维护一个 {@link LinkedList} 对话历史，
- * 最多保存最近 {@value #MAX_HISTORY} 轮（一问一答为一轮）。
- * 使用 {@link ConcurrentHashMap} 存储所有用户的对话，线程安全。</p>
+ * <h3>功能特性</h3>
+ * <ul>
+ *   <li><b>多轮对话</b>：每个用户独立维护最近 10 轮对话历史</li>
+ *   <li><b>工具调用</b>：支持天气查询、地理编码、周边搜索、路线规划、语音合成、塔罗占卜等工具</li>
+ *   <li><b>图片识别</b>：通过多模态 Vision API 分析用户发送的图片内容</li>
+ * </ul>
  *
- * <h3>Function Calling 流程</h3>
- * <ol>
- *   <li>请求中注册全部 5 个工具定义（天气、地理编码、周边搜索、路线规划、语音合成）</li>
- *   <li>设置 {@code tool_choice: "auto"} — 模型自行决定是否调用工具</li>
- *   <li>如模型返回 {@code tool_calls}，解析每个工具的名称和参数 JSON</li>
- *   <li>路由到对应 Tool 执行，将结果以 {@code role: "tool"} 消息回传</li>
- *   <li>重复以上过程，直到模型返回文本内容或达到最大轮数 {@value #MAX_TOOL_ROUNDS}</li>
- * </ol>
- *
- * <h3>工具注册架构</h3>
- * <pre>
- * LLM 请求中的 tools 数组
- *   ├── weatherTool.getToolDefinition()      → get_weather
- *   ├── geocodeTool.getToolDefinition()      → geocode
- *   ├── searchNearbyTool.getToolDefinition() → search_nearby
- *   ├── planRouteTool.getToolDefinition()    → plan_route
- *   └── textToSpeechTool.getToolDefinition() → text_to_speech
- * </pre>
+ * <p>使用 DeepSeek API 进行文本对话，DashScope API 进行图片识别。</p>
  *
  * @see com.example.clawbot.tool.WeatherTool
  * @see com.example.clawbot.tool.GeocodeTool
  * @see com.example.clawbot.tool.SearchNearbyTool
  * @see com.example.clawbot.tool.PlanRouteTool
  * @see com.example.clawbot.tool.TextToSpeechTool
+ * @see com.example.clawbot.tool.TarotTool
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class    LlmService {
 
-    /** HTTP 客户端，统一用于所有外部 API 调用 */
+    /** HTTP 客户端，用于调用外部 API */
     private final RestTemplate restTemplate;
 
-    /** 天气查询工具 — 调用心知天气 API */
+    /** 天气查询工具 */
     private final WeatherTool weatherTool;
     private final ReminderTool reminderTool;
 
-    /** 地理编码工具 — 地址转经纬度（高德地图 API） */
+    /** 地理编码工具（地址转经纬度） */
     private final GeocodeTool geocodeTool;
 
-    /** 周边搜索工具 — 搜索附近 POI（高德地图 API） */
+    /** 周边搜索工具 */
     private final SearchNearbyTool searchNearbyTool;
 
-    /** 路线规划工具 — 驾车路线计算（高德地图 API） */
+    /** 路线规划工具 */
     private final PlanRouteTool planRouteTool;
 
-    /** 语音合成工具 — 文字转 WAV 音频（DashScope TTS） */
+    /** 语音合成工具 */
     private final TextToSpeechTool textToSpeechTool;
 
-    /** Jackson JSON 解析器，线程安全 */
+    /** 塔罗占卜工具 */
+    private final TarotTool tarotTool;
+
+    /** JSON 解析器 */
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     /**
@@ -144,7 +133,10 @@ public class    LlmService {
      */
     private static final String SYSTEM_PROMPT =
             "你是一个友好的微信助手，请用简洁、自然的中文回答用户的问题。回答尽量控制在200字以内。\n"
-                    + "如果调用了 text_to_speech 工具生成了语音，请务必在回复中保留 [audio:工具返回的file_path] 标记，以便系统发送给用户语音消息。";
+                    + "【重要规则】当用户明确要求语音回复、朗读、播报、讲故事/笑话等需要以语音形式呈现内容时，"
+                    + "你必须先生成回复内容，然后调用 text_to_speech 工具将内容转为语音。"
+                    + "调用工具后，在最终回复中保留 [audio:工具返回的file_path] 标记，以便系统发送语音给用户。\n"
+                    + "如果用户没有要求语音，不要主动调用 text_to_speech 工具。";
 
     /**
      * 文本对话入口（面向 WeChatBotService 的主接口）。
@@ -190,7 +182,8 @@ public class    LlmService {
                 searchNearbyTool.getToolDefinition(),
                 planRouteTool.getToolDefinition(),
                 textToSpeechTool.getToolDefinition(),
-                reminderTool.getToolDefinition()
+                reminderTool.getToolDefinition(),
+                tarotTool.getToolDefinition()
         ));
         requestBody.put("tool_choice", "auto"); // 让模型自行决定是否调用
 
@@ -336,6 +329,9 @@ public class    LlmService {
         }
         if (reminderTool.getToolName().equals(functionName)) {
             return reminderTool.execute(functionName, arguments, userId);
+        }
+        if (tarotTool.getToolName().equals(functionName)) {
+            return tarotTool.execute(functionName, arguments);
         }
         return "工具调用失败：未找到工具 " + functionName;
     }

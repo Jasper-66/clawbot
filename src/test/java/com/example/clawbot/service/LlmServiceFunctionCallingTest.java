@@ -4,6 +4,7 @@ import com.example.clawbot.tool.GeocodeTool;
 import com.example.clawbot.tool.PlanRouteTool;
 import com.example.clawbot.tool.ReminderTool;
 import com.example.clawbot.tool.SearchNearbyTool;
+import com.example.clawbot.tool.TarotTool;
 import com.example.clawbot.tool.TextToSpeechTool;
 import com.example.clawbot.tool.WeatherTool;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -66,11 +67,12 @@ class LlmServiceFunctionCallingTest {
     /** WeatherTool 使用真实实例（但其依赖的 WeatherService 已 mock） */
     private final WeatherTool weatherTool = new WeatherTool(weatherService);
 
-    /** 以下 4 个 Tool 均为 mock，本测试用例不涉及它们的功能 */
+    /** 以下 5 个 Tool 均为 mock，本测试用例不涉及它们的功能 */
     private final GeocodeTool geocodeTool = mock(GeocodeTool.class);
     private final SearchNearbyTool searchNearbyTool = mock(SearchNearbyTool.class);
     private final PlanRouteTool planRouteTool = mock(PlanRouteTool.class);
     private final TextToSpeechTool textToSpeechTool = mock(TextToSpeechTool.class);
+    private final TarotTool tarotTool = mock(TarotTool.class);
 
     /** 提醒工具 — 使用真实实例（ReminderService 为内存实现，无需 mock） */
     private final ReminderService reminderService = new ReminderService();
@@ -91,13 +93,14 @@ class LlmServiceFunctionCallingTest {
     void setUp() {
         restTemplate = new RestTemplate();
         server = MockRestServiceServer.bindTo(restTemplate).build();
-        llmService = new LlmService(restTemplate, weatherTool, reminderTool, geocodeTool, searchNearbyTool, planRouteTool, textToSpeechTool);
+        llmService = new LlmService(restTemplate, weatherTool, reminderTool, geocodeTool, searchNearbyTool, planRouteTool, textToSpeechTool, tarotTool);
 
         // Mock 工具的 getToolName() 返回非 null 值，避免 executeTool 中的 NPE
         when(geocodeTool.getToolName()).thenReturn("geocode");
         when(searchNearbyTool.getToolName()).thenReturn("search_nearby");
         when(planRouteTool.getToolName()).thenReturn("plan_route");
         when(textToSpeechTool.getToolName()).thenReturn("text_to_speech");
+        when(tarotTool.getToolName()).thenReturn("tarot");
 
         // 通过反射注入配置值（避免依赖 Spring 容器和 application.properties）
         ReflectionTestUtils.setField(llmService, "apiKey", "test-key");
