@@ -94,6 +94,7 @@ public class LlmService {
                                     List<Map<String, Object>> messages) {
         try {
             for (int toolRound = 0; toolRound <= MAX_TOOL_ROUNDS; toolRound++) {
+                //发送大模型请求
                 JsonNode assistant = callChatCompletion(baseUrl, apiKey, requestBody);
                 JsonNode toolCalls = assistant.path("tool_calls");
 
@@ -104,7 +105,8 @@ public class LlmService {
                 if (toolRound == MAX_TOOL_ROUNDS) {
                     return "抱歉，工具调用次数过多，请换一种方式提问。";
                 }
-
+                //在调用工具前，必须将模型返回的包含 tool_calls 的 assistant 消息原样追加到历史上下文 messages 中。
+                // 这是主流 LLM API 的强制规范，否则下一轮请求会报错。
                 messages.add(toAssistantToolCallMessage(assistant));
                 for (JsonNode toolCall : toolCalls) {
                     String toolCallId = toolCall.path("id").asText("");
@@ -118,6 +120,7 @@ public class LlmService {
                     String toolResult = weatherTool.execute(functionName, arguments);
                     log.info("执行工具: name={}, id={}", functionName, toolCallId);
 
+                    //作用是将本地工具执行的结果回传给大模型
                     messages.add(Map.of(
                             "role", "tool",
                             "tool_call_id", toolCallId,

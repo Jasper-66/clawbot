@@ -29,7 +29,7 @@ class LlmServiceFunctionCallingTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final WeatherService weatherService = mock(WeatherService.class);
-    private final WeatherTool weatherTool = new WeatherTool(weatherService, objectMapper);
+    private final WeatherTool weatherTool = new WeatherTool(weatherService);
     private RestTemplate restTemplate;
     private MockRestServiceServer server;
     private LlmService llmService;
@@ -54,7 +54,7 @@ class LlmServiceFunctionCallingTest {
                     JsonNode body = readBody(((MockClientHttpRequest) request).getBodyAsBytes());
                     assertThat(body.path("tool_choice").asText()).isEqualTo("auto");
                     assertThat(body.path("tools").get(0).path("function").path("name").asText())
-                            .isEqualTo(WeatherTool.NAME);
+                            .isEqualTo("get_weather");
                 })
                 .andRespond(withSuccess("""
                         {
@@ -67,7 +67,7 @@ class LlmServiceFunctionCallingTest {
                                 "id": "call_weather_1",
                                 "type": "function",
                                 "function": {
-                                  "name": "get_current_weather",
+                                  "name": "get_weather",
                                   "arguments": "{\\\"city\\\":\\\"杭州\\\"}"
                                 }
                               }]
