@@ -3,6 +3,7 @@ package com.example.clawbot.service;
 import com.example.clawbot.tool.GeocodeTool;
 import com.example.clawbot.tool.PlanRouteTool;
 import com.example.clawbot.tool.SearchNearbyTool;
+import com.example.clawbot.tool.SearchTool;
 import com.example.clawbot.tool.TextToSpeechTool;
 import com.example.clawbot.tool.WeatherTool;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -84,6 +85,9 @@ public class LlmService {
     /** 语音合成工具 — 文字转 WAV 音频（DashScope TTS） */
     private final TextToSpeechTool textToSpeechTool;
 
+    /** 实时搜索工具 — 调用 Tavily Search API 获取最新信息 */
+    private final SearchTool searchTool;
+
     /** Jackson JSON 解析器，线程安全 */
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -136,8 +140,7 @@ public class LlmService {
      * </ul>
      */
     private static final String SYSTEM_PROMPT =
-            "你是一个友好的微信助手，请用简洁、自然的中文回答用户的问题。回答尽量控制在200字以内。\n"
-                    + "如果调用了 text_to_speech 工具生成了语音，请务必在回复中保留 [audio:工具返回的file_path] 标记，以便系统发送给用户语音消息。";
+            "你是一个友好的微信助手，请用简洁、自然的中文回答用户的问题。回答尽量控制在200字以内。";
 
     /**
      * 文本对话入口（面向 WeChatBotService 的主接口）。
@@ -182,12 +185,19 @@ public class LlmService {
                 geocodeTool.getToolDefinition(),
                 searchNearbyTool.getToolDefinition(),
                 planRouteTool.getToolDefinition(),
-                textToSpeechTool.getToolDefinition()
+                textToSpeechTool.getToolDefinition(),
+                searchTool.getToolDefinition()
         ));
         requestBody.put("tool_choice", "auto"); // 让模型自行决定是否调用
 
-        // 进入 Function Calling 闭环
-        String reply = callLlmWithTools(requestBody, messages);
+        // 进入 Function Calling 闭环，同时追踪 TTS 文件路径
+        String[] ttsFilePathHolder = new String[1];
+        String reply = callLlmWithTools(requestBody, messages, ttsFilePathHolder);
+
+        // 如果 TTS 工具生成了音频文件，代码自动注入 [audio:path] 标记（不依赖 LLM）
+        if (ttsFilePathHolder[0] != null) {
+            reply = "[audio:" + ttsFilePathHolder[0] + "]" + reply;
+        }
 
         // 更新对话历史（线程安全），淘汰旧消息
         synchronized (history) {
@@ -233,14 +243,12 @@ public class LlmService {
      * @return 模型最终的文本回复；超轮数或异常时返回兜底提示
      */
     private String callLlmWithTools(Map<String, Object> requestBody,
-                                    List<Map<String, Object>> messages) {
+                                    List<Map<String, Object>> messages,
+                                    String[] ttsFilePathOut) {
         try {
             for (int toolRound = 0; toolRound <= MAX_TOOL_ROUNDS; toolRound++) {
-<<<<<<< HEAD
                 //发送大模型请求
-=======
                 // 1. 调用 LLM
->>>>>>> f5994d030b0e3eb78941bf38030cc3b2615bb91a
                 JsonNode assistant = callChatCompletion(baseUrl, apiKey, requestBody);
                 JsonNode toolCalls = assistant.path("tool_calls");
 
@@ -254,13 +262,9 @@ public class LlmService {
                 if (toolRound == MAX_TOOL_ROUNDS) {
                     return "抱歉，工具调用次数过多，请换一种方式提问。";
                 }
-<<<<<<< HEAD
                 //在调用工具前，必须将模型返回的包含 tool_calls 的 assistant 消息原样追加到历史上下文 messages 中。
                 // 这是主流 LLM API 的强制规范，否则下一轮请求会报错。
-=======
 
-                // 4. 将助手的工具调用消息加入消息列表
->>>>>>> f5994d030b0e3eb78941bf38030cc3b2615bb91a
                 messages.add(toAssistantToolCallMessage(assistant));
 
                 // 5. 逐个执行工具并将结果回传
@@ -275,6 +279,19 @@ public class LlmService {
                     String arguments = function.path("arguments").asText("{}");
                     String toolResult = executeTool(functionName, arguments);
                     log.info("执行工具: name={}, id={}", functionName, toolCallId);
+
+                    // TTS 工具执行后，解析文件路径供后续自动注入 [audio:...] 标记
+                    if (textToSpeechTool.getToolName().equals(functionName)) {
+                        try {
+                            JsonNode resultNode = objectMapper.readTree(toolResult);
+                            String ttsPath = resultNode.path("file_path").asText(null);
+                            if (ttsPath != null) {
+                                ttsFilePathOut[0] = ttsPath;
+                            }
+                        } catch (Exception e) {
+                            log.warn("解析 TTS 工具返回的文件路径失败: {}", e.getMessage());
+                        }
+                    }
 
                     //作用是将本地工具执行的结果回传给大模型
                     messages.add(Map.of(
@@ -320,6 +337,9 @@ public class LlmService {
         }
         if (textToSpeechTool.getToolName().equals(functionName)) {
             return textToSpeechTool.execute(functionName, arguments);
+        }
+        if (searchTool.getToolName().equals(functionName)) {
+            return searchTool.execute(functionName, arguments);
         }
         return "工具调用失败：未找到工具 " + functionName;
     }

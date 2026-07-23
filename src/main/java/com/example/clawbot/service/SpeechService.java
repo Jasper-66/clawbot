@@ -108,6 +108,41 @@ public class SpeechService {
         VOICE_INFO.put("Rocky",     new String[]{"粤语-阿强", "幽默风趣的粤语男声"});
     }
 
+    /** 音色标签映射 — 用于模糊描述匹配，Key 为音色英文名，Value 为匹配关键词集合 */
+    private static final LinkedHashMap<String, java.util.Set<String>> VOICE_TAGS =
+            new LinkedHashMap<>();
+    static {
+        VOICE_TAGS.put("Cherry",    java.util.Set.of("阳光", "积极", "亲切", "自然", "小姐姐"));
+        VOICE_TAGS.put("Ethan",     java.util.Set.of("标准", "普通话", "阳光", "温暖"));
+        VOICE_TAGS.put("Serena",    java.util.Set.of("温柔", "小姐姐", "甜"));
+        VOICE_TAGS.put("Chelsie",   java.util.Set.of("二次元", "虚拟", "女友"));
+        VOICE_TAGS.put("Momo",      java.util.Set.of("撒娇", "搞怪", "逗"));
+        VOICE_TAGS.put("Vivian",    java.util.Set.of("拽", "暴躁"));
+        VOICE_TAGS.put("Bella",     java.util.Set.of("萝莉", "萌"));
+        VOICE_TAGS.put("Mia",       java.util.Set.of("温顺", "乖巧", "温柔"));
+        VOICE_TAGS.put("Nofish",    java.util.Set.of("设计师"));
+        VOICE_TAGS.put("Kai",       java.util.Set.of("SPA", "耳朵", "温柔"));
+        VOICE_TAGS.put("Neil",      java.util.Set.of("新闻", "专业", "主持人", "咬字"));
+        VOICE_TAGS.put("Eldric Sage", java.util.Set.of("沉稳", "睿智", "老者", "成熟"));
+        VOICE_TAGS.put("Vincent",   java.util.Set.of("沙哑", "烟嗓", "江湖", "豪情", "大叔"));
+        VOICE_TAGS.put("Sunny",     java.util.Set.of("四川", "川妹子", "甜"));
+        VOICE_TAGS.put("Rocky",     java.util.Set.of("粤语", "广东话", "幽默", "风趣"));
+    }
+
+    /** 男性音色集合 */
+    private static final java.util.Set<String> MALE_VOICES =
+            java.util.Set.of("Ethan", "Nofish", "Kai", "Neil", "Eldric Sage", "Vincent", "Rocky");
+
+    /** 女性音色集合 */
+    private static final java.util.Set<String> FEMALE_VOICES =
+            java.util.Set.of("Cherry", "Serena", "Chelsie", "Momo", "Vivian", "Bella", "Mia", "Sunny");
+
+    /** 性别关键词 — 用于模糊匹配时自动附加到对应音色 */
+    private static final java.util.Set<String> MALE_KEYWORDS =
+            java.util.Set.of("男声", "男生", "男性", "男", "男孩", "小哥哥", "哥哥");
+    private static final java.util.Set<String> FEMALE_KEYWORDS =
+            java.util.Set.of("女声", "女生", "女性", "女", "女孩", "小姐姐", "妹妹");
+
     /** SILK 解码器可执行文件路径（silk_v3_decoder），用于将微信 SILK 格式转为 PCM */
     @Value("${silk.decoder.path}")
     private String silkDecoderPath;
@@ -485,11 +520,11 @@ public class SpeechService {
      */
     public String setVoice(String userId, String voiceName) {
         if (voiceName == null || voiceName.isBlank()) {
-            return "请输入音色名称，例如「切换音色Cherry」或「切换音色芊悦」。";
+            return "请描述你想要的音色，例如「切换音色Cherry」、「换个温柔的女生声音」或「有没有沉稳的男声」。";
         }
         String voice = findVoice(voiceName.trim());
         if (voice == null) {
-            return "未找到音色「" + voiceName.trim() + "」，发送「音色列表」查看可用音色。";
+            return "未能匹配到适合「" + voiceName.trim() + "」的音色，发送「音色列表」查看所有音色及描述。";
         }
         userVoices.put(userId, voice);
         String[] info = VOICE_INFO.get(voice);
@@ -527,7 +562,7 @@ public class SpeechService {
                     .append("（").append(entry.getValue()[0]).append("）")
                     .append(" — ").append(entry.getValue()[1]).append("\n");
         }
-        sb.append("\n发送「切换音色 + 英文名或中文名」即可切换，例如「切换音色Ethan」。");
+        sb.append("\n发送「切换音色 + 名称」或直接描述想要的音色即可切换，例如「换个温柔的女生声音」。");
         return sb.toString();
     }
 
@@ -548,7 +583,7 @@ public class SpeechService {
      * @return 音色英文参数名，匹配不到返回 {@code null}
      */
     private String findVoice(String input) {
-        // 第一轮：精确匹配（忽略大小写）
+        // 第一轮：精确匹配（忽略大小写的英文名、精确中文名）
         for (Map.Entry<String, String[]> entry : VOICE_INFO.entrySet()) {
             if (entry.getKey().equalsIgnoreCase(input)) return entry.getKey();
             if (entry.getValue()[0].equals(input)) return entry.getKey();
@@ -558,7 +593,31 @@ public class SpeechService {
             if (entry.getKey().toLowerCase().contains(input.toLowerCase())) return entry.getKey();
             if (entry.getValue()[0].contains(input)) return entry.getKey();
         }
-        return null;
+        // 第三轮：标签关键词打分（支持描述性输入如「温柔的女生声音」）
+        String lowerInput = input.toLowerCase();
+        String bestVoice = null;
+        int bestScore = 0;
+        for (Map.Entry<String, java.util.Set<String>> tagEntry : VOICE_TAGS.entrySet()) {
+            String voiceName = tagEntry.getKey();
+            int score = 0;
+            for (String tag : tagEntry.getValue()) {
+                if (lowerInput.contains(tag)) score++;
+            }
+            // 性别标签加分
+            boolean isMale = MALE_VOICES.contains(voiceName);
+            boolean isFemale = FEMALE_VOICES.contains(voiceName);
+            for (String kw : MALE_KEYWORDS) {
+                if (lowerInput.contains(kw) && isMale) score++;
+            }
+            for (String kw : FEMALE_KEYWORDS) {
+                if (lowerInput.contains(kw) && isFemale) score++;
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                bestVoice = voiceName;
+            }
+        }
+        return bestScore > 0 ? bestVoice : null;
     }
 
     /**

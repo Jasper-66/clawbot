@@ -63,6 +63,10 @@ import java.util.concurrent.ConcurrentHashMap;
 @RequiredArgsConstructor
 public class WeChatBotService {
 
+    /** 匹配 LLM 回复中的 {@code [audio:文件路径]} 语音标记 */
+    private static final java.util.regex.Pattern AUDIO_MARKER_PATTERN =
+            java.util.regex.Pattern.compile("\\[audio:(.+?)]");
+
     /** LLM 对话服务 — 处理文本聊天和图片识别 */
     private final LlmService llmService;
 
@@ -305,27 +309,21 @@ public class WeChatBotService {
         if (reply == null || reply.isEmpty()) {
             return;
         }
-        // 使用正则匹配 [audio:文件路径] 标记
-        java.util.regex.Matcher matcher = java.util.regex.Pattern
-                .compile("\\[audio:(.+?)]")
-                .matcher(reply);
+        java.util.regex.Matcher matcher = AUDIO_MARKER_PATTERN.matcher(reply);
         if (matcher.find()) {
             String audioPath = matcher.group(1);
             java.io.File audioFile = new java.io.File(audioPath);
             if (audioFile.exists() && audioFile.isFile()) {
                 try {
-                    // 读取音频文件并发送语音消息
                     byte[] audioBytes = java.nio.file.Files.readAllBytes(audioFile.toPath());
                     client.sendFile(fromUser, audioBytes, "语音回复.wav", "");
                     log.info("LLM 触发的语音已发送: path={}, size={} bytes", audioPath, audioBytes.length);
 
-                    // 移除音频标记，将剩余文本作为文字消息发送
                     String remaining = reply.replace(matcher.group(), "").trim();
                     if (!remaining.isEmpty()) {
                         sendReply(fromUser, remaining);
                     }
 
-                    // 清理临时文件
                     try {
                         audioFile.delete();
                     } catch (Exception ignored) {
@@ -337,8 +335,14 @@ public class WeChatBotService {
             } else {
                 log.warn("LLM 标记的音频文件不存在: path={}", audioPath);
             }
+            // 音频发送失败或文件不存在 → 清理 [audio:...] 标记后以文本发送
+            String cleaned = AUDIO_MARKER_PATTERN.matcher(reply).replaceAll("").trim();
+            if (!cleaned.isEmpty()) {
+                sendReply(fromUser, cleaned);
+            }
+            return;
         }
-        // 无音频标记或发送失败 → 作为普通文本发送
+        // 无音频标记 → 作为普通文本发送
         sendReply(fromUser, reply);
     }
 
@@ -507,12 +511,10 @@ public class WeChatBotService {
             log.info("语音识别结果: text=[{}], isImageGen={}",
                     recognizedText, isImageGenRequest(recognizedText));
 
-<<<<<<< HEAD
             // 路由分发：图片生成 / 闲聊（天气由 LLM function calling 处理）
             // 图片生成保留专用流程，其余文本由 LLM 决定是否调用工具。
-=======
             // 根据识别结果路由：图片生成 或 LLM 对话
->>>>>>> f5994d030b0e3eb78941bf38030cc3b2615bb91a
+
             if (isImageGenRequest(recognizedText)) {
                 handleImageGeneration(fromUser, recognizedText);
             } else {
@@ -566,11 +568,29 @@ public class WeChatBotService {
      * @return true 如果是音色相关命令
      */
     private boolean isVoiceCommand(String text) {
-        return text.startsWith("切换音色") || text.startsWith("设置音色")
+        // 精确命令
+        if (text.startsWith("切换音色") || text.startsWith("设置音色")
                 || text.startsWith("换成音色") || text.startsWith("更换音色")
                 || text.equals("音色列表") || text.equals("有哪些音色")
                 || text.equals("当前音色") || text.equals("我的音色")
-                || text.startsWith("音色");
+                || text.startsWith("音色")) {
+            return true;
+        }
+        // 自然语言音色请求：必须同时包含"声音关键词"和"动作关键词"
+        String[] voiceKeys = {"声音", "语音", "音色", "声线", "嗓音"};
+        String[] actionKeys = {"切换", "换", "设置", "改", "想要", "换一个", "换个",
+                "变成", "改成", "有没有", "给我", "换个"};
+
+        boolean hasVoice = false;
+        for (String kw : voiceKeys) {
+            if (text.contains(kw)) { hasVoice = true; break; }
+        }
+        if (!hasVoice) return false;
+
+        for (String kw : actionKeys) {
+            if (text.contains(kw)) return true;
+        }
+        return false;
     }
 
     /**
