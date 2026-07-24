@@ -1,8 +1,11 @@
 package com.example.clawbot.config;
 
+import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.client.RestTemplate;
+
+import java.time.Duration;
 
 /**
  * HTTP 客户端配置模块。
@@ -12,19 +15,23 @@ import org.springframework.web.client.RestTemplate;
  * {@code SpeechService}、{@code FileSummaryService} 等。</p>
  *
  * <h3>设计说明</h3>
- * <p>当前为最小化配置，使用 {@code RestTemplate} 默认构造器。默认行为：</p>
  * <ul>
+ *   <li>使用 {@code RestTemplateBuilder} 配置连接超时和读取超时，防止请求无限等待</li>
  *   <li>连接通过 {@code HttpURLConnection}（JDK 内置，无需额外依赖）</li>
  *   <li>无连接池 — 每次请求新建 TCP 连接，适合低并发场景</li>
- *   <li>无超时设置 — 依赖操作系统默认超时，生产环境建议显式配置</li>
  *   <li>无重试机制 — 失败即抛异常，由各 Service 自行处理</li>
  * </ul>
  *
+ * <h3>超时设置</h3>
+ * <ul>
+ *   <li>连接超时（connectTimeout）：10 秒 — 建立 TCP 连接的最大等待时间</li>
+ *   <li>读取超时（readTimeout）：60 秒 — 服务器响应后，读取完整响应的最大等待时间</li>
+ * </ul>
+ * LLM 调用（尤其是多轮工具调用后的总结回复）可能较慢，需要较长的读取超时。
+ *
  * <h3>扩展方向</h3>
- * <p>如需生产级特性，可替换为：</p>
  * <ul>
  *   <li>使用 {@code HttpComponentsClientHttpRequestFactory} 启用 Apache HttpClient 连接池</li>
- *   <li>设置 {@code connectTimeout} / {@code readTimeout} 控制请求超时</li>
  *   <li>添加 {@code ClientHttpRequestInterceptor} 实现统一日志/认证/重试</li>
  *   <li>迁移到 {@code RestClient}（Spring 6.1+ 推荐的同步 HTTP 客户端）</li>
  * </ul>
@@ -49,7 +56,10 @@ public class RestTemplateConfig {
      * @return 新创建的 {@link RestTemplate} 实例
      */
     @Bean
-    public RestTemplate restTemplate() {
-        return new RestTemplate();
+    public RestTemplate restTemplate(RestTemplateBuilder builder) {
+        return builder
+                .setConnectTimeout(Duration.ofSeconds(10))
+                .setReadTimeout(Duration.ofSeconds(60))
+                .build();
     }
 }

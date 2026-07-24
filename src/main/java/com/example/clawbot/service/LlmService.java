@@ -19,6 +19,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
+import jakarta.annotation.PostConstruct;
+
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -120,6 +122,36 @@ public class    LlmService {
     /** 多模态 Vision 模型名称（如 qwen-vl-plus） */
     @Value("${vision.api.model}")
     private String visionModel;
+
+    /**
+     * 初始化配置，对所有字符串配置项做 trim 处理。
+     *
+     * <p>防止 .properties 文件中因行内注释、尾部空格等导致 URL、Key 等值无效。
+     * 参照 WeatherService 的防御性处理模式。</p>
+     */
+    @PostConstruct
+    public void init() {
+        if (apiKey != null) {
+            apiKey = apiKey.trim();
+        }
+        if (baseUrl != null) {
+            baseUrl = baseUrl.trim();
+        }
+        if (model != null) {
+            model = model.trim();
+        }
+        if (visionApiKey != null) {
+            visionApiKey = visionApiKey.trim();
+        }
+        if (visionBaseUrl != null) {
+            visionBaseUrl = visionBaseUrl.trim();
+        }
+        if (visionModel != null) {
+            visionModel = visionModel.trim();
+        }
+        log.info("LLM 配置初始化完成: baseUrl={}, model={}, visionBaseUrl={}, visionModel={}",
+                baseUrl, model, visionBaseUrl, visionModel);
+    }
 
     /**
      * 系统提示词（System Prompt），定义机器人的行为准则。
@@ -239,7 +271,9 @@ public class    LlmService {
         try {
             for (int toolRound = 0; toolRound <= MAX_TOOL_ROUNDS; toolRound++) {
                 // 1. 调用 LLM
+                //LLM 返回的 choices[0].message 节点，包含回复文本和可能的工具调用
                 JsonNode assistant = callChatCompletion(baseUrl, apiKey, requestBody);
+                //如果 LLM 决定调用工具，它是一个数组，否则为空节点
                 JsonNode toolCalls = assistant.path("tool_calls");
 
                 // 2. 无工具调用 → 模型已完成回答
@@ -392,7 +426,7 @@ public class    LlmService {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.setBearerAuth(key);
-
+          //序列化请求体
         String requestJson = objectMapper.writeValueAsString(requestBody);
         log.info("LLM 请求: model={}, url={}", requestBody.get("model"), apiUrl);
         HttpEntity<String> entity = new HttpEntity<>(requestJson, headers);

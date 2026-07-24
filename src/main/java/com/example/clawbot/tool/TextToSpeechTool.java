@@ -27,7 +27,7 @@ import java.util.UUID;
  *
  * <h3>语音标记机制</h3>
  * <p>工具执行后在 LLM 的回复中嵌入 {@code [audio:/absolute/path/to/file.wav]} 标记。
- * {@link com.example.clawbot.service.WeChatBotService#handleLlmReply} 在发送前
+ * {@link com.example.clawbot.service.WeChatBotService#”handleLlmReply“} 在发送前
  * 检测此标记，读取文件并通过微信发送语音消息。</p>
  *
  * <h3>文件存储</h3>
@@ -35,7 +35,7 @@ import java.util.UUID;
  * 使用时间戳 + UUID 命名（如 {@code tts_1712345678000_a1b2c3d4.wav}）。</p>
  *
  * @see com.example.clawbot.service.SpeechService
- * @see com.example.clawbot.service.WeChatBotService#handleLlmReply
+ * @see com.example.clawbot.service.WeChatBotService#“handleLlmReply”
  * @see com.example.clawbot.service.LlmService
  */
 @Slf4j

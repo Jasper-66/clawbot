@@ -200,7 +200,7 @@ public class PlanRouteTool {
                     if (radius > MAX_RADIUS) radius = MAX_RADIUS;
                 }
 
-                // 解析并校验排序规则
+                // 解析并校验排序规则,如果没有指定排序方式，默认按照最近排序
                 String sortrule = arguments.path("sortrule").asText("distance").trim();
                 if (!"distance".equals(sortrule) && !"weight".equals(sortrule)) {
                     sortrule = "distance";
@@ -299,7 +299,31 @@ public class PlanRouteTool {
      *     instruction（指引文字）、distance（该步距离）、
      *     duration（该步耗时）、action（动作类型）</li>
      * </ul>
+     *高德返回的驾车路线 JSON 结构：
      *
+     *
+     * JSON
+     *
+     * {
+     *   "status": "1",
+     *   "route": {
+     *     "paths": [
+     *       {
+     *         "distance": "5000",
+     *         "duration": "600",
+     *         "steps": [
+     *           {
+     *             "instruction": "沿长安街向东行驶500米",
+     *             "distance": "500",
+     *             "duration": "30",
+     *             "action": "向前"
+     *           },
+     *           ...
+     *         ]
+     *       }
+     *     ]
+     *   }
+     * }
      * @param origin      起点经纬度
      * @param destination 终点经纬度
      * @return 路线规划结果 JSON 字符串
@@ -341,10 +365,10 @@ public class PlanRouteTool {
             if (stepsNode.isArray()) {
                 for (JsonNode step : stepsNode) {
                     Map<String, Object> stepItem = new java.util.LinkedHashMap<>();
-                    stepItem.put("instruction", step.path("instruction").asText(""));
-                    stepItem.put("distance", step.path("distance").asText(""));
-                    stepItem.put("duration", step.path("duration").asText(""));
-                    stepItem.put("action", step.path("action").asText(""));
+                    stepItem.put("instruction", step.path("instruction").asText(""));//导航文字指引
+                    stepItem.put("distance", step.path("distance").asText(""));//该段距离
+                    stepItem.put("duration", step.path("duration").asText(""));//该段耗时
+                    stepItem.put("action", step.path("action").asText(""));//动作类型，例如向左转
                     steps.add(stepItem);
                 }
             }

@@ -175,6 +175,7 @@ public class WeChatBotService {
         while (running) {
             try {
                 // 主动向微信服务器发起 HTTP 请求，获取最新消息列表
+                //client.getUpdates()主动向微信服务器拉取新消息
                 List<WeixinMessage> messages = client.getUpdates();
                 for (WeixinMessage msg : messages) {
                     Long msgId = msg.getMessage_id();
@@ -194,7 +195,7 @@ public class WeChatBotService {
                 }
             }
 
-            // 轮询间隔：2 秒
+            // 每两秒轮询一次
             try {
                 Thread.sleep(2000);
             } catch (InterruptedException e) {
@@ -291,7 +292,7 @@ public class WeChatBotService {
 
     /**
      * 处理 LLM 回复 — 识别并发送内嵌的语音标记。
-     *
+     *它负责解析 LLM 返回的回复，检测其中是否包含语音标记，并决定发语音、发文字、还是两者都发。
      * <p>LLM 可能在回复中嵌入 {@code [audio:/path/to/file.wav]} 标记
      * （由 TextToSpeechTool 生成）。此方法检测标记并：</p>
      * <ol>
@@ -412,6 +413,7 @@ public class WeChatBotService {
             log.error("发送提示消息失败", e);
         }
         try {
+            //提取提示词，删除生成之类的
             String prompt = extractImagePrompt(text);
             log.info("图片生成请求: prompt={}", prompt);
             byte[] imageBytes = imageGenerationService.generateImage(prompt);
@@ -567,6 +569,7 @@ public class WeChatBotService {
         try {
             client.sendTextWithTyping(fromUser, "正在查看文件，请稍候...", 500);
             byte[] fileBytes = client.downloadFileFromMessageItem(item);
+            //调用FileSummaryService来提取内容并生成摘要
             String summary = fileSummaryService.summarizeFile(fileBytes, fileItem.getFile_name());
             sendReply(fromUser, summary);
         } catch (Exception e) {

@@ -74,7 +74,7 @@ public class GeocodeTool {
     /**
      * 获取工具名称。
      *
-     * <p>用于在 {@link com.example.clawbot.service.LlmService#executeTool} 中路由
+     * <p>用于在 {@link com.example.clawbot.service.LlmService
      * 以及与其他 Tool 区分。</p>
      *
      * @return 工具标识名 "geocode"
@@ -147,7 +147,7 @@ public class GeocodeTool {
             String place = arguments.path("place").asText("").trim();
             if (place.isEmpty()) {
                 return "工具调用失败：place 参数不能为空";
-            }
+            }//长度检验
             if (place.length() > MAX_PLACE_LENGTH) {
                 return "工具调用失败：place 参数过长";
             }
@@ -155,6 +155,7 @@ public class GeocodeTool {
             log.info("执行地址解析工具: place={}", place);
 
             // 调用高德地理编码 API（需 UTF-8 编码中文参数）
+            //构建URL请求
             URI uri = UriComponentsBuilder.fromUriString(GEOCODE_URL)
                     .queryParam("key", amapApiKey)
                     .queryParam("address", place)
@@ -162,7 +163,9 @@ public class GeocodeTool {
                     .build()
                     .toUri();
 
+             //发Get请求
             String response = restTemplate.getForObject(uri, String.class);
+            //解析成JsonNode
             JsonNode root = objectMapper.readTree(response);
 
             // 高德 API 用 status="1" 表示成功
@@ -177,13 +180,16 @@ public class GeocodeTool {
             if (!geocodes.isArray() || geocodes.isEmpty()) {
                 return String.format("{\"error\":\"未找到地点：%s\"}", place);
             }
-
             JsonNode result = geocodes.get(0);
+
+            //标准化地址
             String formattedAddress = result.path("formatted_address").asText(place);
+            //经度纬度
             String location = result.path("location").asText("");
             String country = result.path("country").asText("");
             String province = result.path("province").asText("");
             String city = result.path("city").asText("");
+            //区县
             String district = result.path("district").asText("");
 
             // 高德 location 格式："经度,纬度" → 拆分为两个 double

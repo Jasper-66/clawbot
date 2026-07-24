@@ -17,7 +17,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * <h3>交互流程</h3>
  * <pre>
  * 阶段1：等待问题 → 用户输入问题 → 进入阶段2
- * 阶段2：选择牌阵 → 用户选择牌阵 → 进入阶段3（自主抽牌）或阶段4（随机抽牌）
+ * 阶段2：选择牌阵 → 用户选择牌阵 → 进入阶段3
  * 阶段3：抽牌选择 → 用户选择牌码 → 进入阶段4
  * 阶段4：显示结果 → 用户选择是否继续 → 返回阶段1
  * </pre>
@@ -160,7 +160,7 @@ public class TarotTool {
                 "function", Map.of(
                         "name", NAME,
                         "description", "韦特塔罗牌专业解读。当用户想要占卜、算命、预测未来、寻求指引时使用此工具。" +
-                                "采用多阶段交互：先输入问题，再选择牌阵，最后选择牌码（支持自主抽牌或随机抽牌）。",
+                                "采用多阶段交互：先输入问题，再选择牌阵，最后选择牌码进行抽牌。",
                         "parameters", Map.of(
                                 "type", "object",
                                 "properties", Map.of(
@@ -169,10 +169,9 @@ public class TarotTool {
                                                 "description", "操作类型：" +
                                                         "- 'start'：开始新的占卜流程 " +
                                                         "- 'select_spread'：选择牌阵 " +
-                                                        "- 'draw'：用户选择牌码进行抽牌 " +
-                                                        "- 'random'：随机抽牌 " +
+                                                        "- 'draw'：用户选择数字进行抽牌 " +
                                                         "- 'continue'：询问是否继续占卜",
-                                                "enum", List.of("start", "select_spread", "draw", "random", "continue")
+                                                "enum", List.of("start", "select_spread", "draw", "continue")
                                         ),
                                         "user_id", Map.of(
                                                 "type", "string",
@@ -243,6 +242,7 @@ public class TarotTool {
 
         try {
             JsonNode arguments = objectMapper.readTree(argumentsJson);
+            //安全地从 JSON 参数里取出操作类型，为后续分支判断做准备。
             String action = arguments.path("action").asText("").trim();
             String userId = arguments.path("user_id").asText("").trim();
 
@@ -262,12 +262,10 @@ public class TarotTool {
                     return handleSelectSpread(context, arguments);
                 case "draw":
                     return handleDraw(context, arguments);
-                case "random":
-                    return handleRandom(context, arguments);
                 case "continue":
-                    return handleContinue(context, arguments);
-                default:
-                    return objectMapper.writeValueAsString(Map.of(
+                    return handleContinue(context, arguments, userId);
+                default: return objectMapper.writeValueAsString(Map.of(
+
                             "status", "error",
                             "message", "不支持的操作类型: " + action
                     ));
@@ -306,16 +304,17 @@ public class TarotTool {
      * 处理选择牌阵操作。
      */
     private String handleSelectSpread(SessionContext context, JsonNode arguments) throws Exception {
+        // 1. 校验当前状态
         if (context.state != SessionState.WAITING_SPREAD) {
             return objectMapper.writeValueAsString(Map.of(
                     "status", "error",
                     "message", "当前状态不允许选择牌阵，请先输入问题"
             ));
         }
-
+        // 2. 获取用户选择的牌阵
         String spreadType = arguments.path("spread_type").asText("").trim();
 
-        // 如果用户输入的是编号，转换为牌阵ID
+        // 3.如果用户输入的是编号，转换为牌阵ID
         if (spreadType.matches("\\d+")) {
             int index = Integer.parseInt(spreadType) - 1;
             if (index >= 0 && index < SPREAD_INFO.size()) {
@@ -327,21 +326,21 @@ public class TarotTool {
                 ));
             }
         }
-
+        // 4. 校验牌阵ID是否有效，如果既不是编号也不是牌阵id，返回错误
         if (!SPREAD_INFO.containsKey(spreadType)) {
             return objectMapper.writeValueAsString(Map.of(
                     "status", "error",
                     "message", "无效的牌阵类型，请从以下选项中选择：" + String.join(", ", SPREAD_INFO.keySet())
             ));
         }
-
+// 5. 保存选中的牌阵，生成随机数字-牌映射，更新状态
         context.spreadType = spreadType;
-        // 生成随机数字-牌映射（每次占卜都不同）
+
         context.numberToCardMap = generateNumberToCardMap();
         context.state = SessionState.WAITING_CARDS;
-
-        String spreadName = SPREAD_INFO.get(spreadType)[0];
-        int cardCount = Integer.parseInt(SPREAD_INFO.get(spreadType)[1]);
+        // 6. 准备响应消息
+        String spreadName = SPREAD_INFO.get(spreadType)[0];//牌阵中文名
+        int cardCount = Integer.parseInt(SPREAD_INFO.get(spreadType)[1]);//牌阵需要的数量
 
         // 只提示范围，不输出完整牌码列表
         String message = "🎴 已选择「" + spreadName + "」，需要选择 " + cardCount + " 张牌\n\n"
@@ -350,7 +349,7 @@ public class TarotTool {
                 + "例如：7 22 19\n\n"
                 + "（提示：选牌后系统会揭晓每张数字对应的塔罗牌）\n"
                 + "🔮 本次占卜的数字-牌对应关系已随机生成";
-
+//返回结果
         return objectMapper.writeValueAsString(Map.of(
                 "status", "waiting_for_cards",
                 "spread_type", spreadType,
@@ -429,45 +428,9 @@ public class TarotTool {
     }
 
 /**
-     * 处理随机抽牌。
-     *
-     * <p>如果用户还没选择牌阵，强制返回让用户选择牌阵，不设置默认值。</p>
-     */
-    private String handleRandom(SessionContext context, JsonNode arguments) throws Exception {
-        // 如果还没输入问题，先收集问题
-        if (context.state == SessionState.WAITING_QUESTION) {
-            String userQuestion = arguments.path("user_question").asText("").trim();
-            if (userQuestion.isEmpty()) {
-                return objectMapper.writeValueAsString(Map.of(
-                        "status", "waiting_for_question",
-                        "message", "🔮 欢迎来到塔罗占卜！\n\n请告诉我您想要占卜的问题："
-                ));
-            }
-            context.userQuestion = userQuestion;
-            context.state = SessionState.WAITING_SPREAD;
-        }
-
-        // 如果还没选择牌阵，强制让用户选择，不设置默认值
-        if (context.state == SessionState.WAITING_SPREAD || context.spreadType == null) {
-            return objectMapper.writeValueAsString(Map.of(
-                    "status", "waiting_for_spread",
-                    "user_question", context.userQuestion,
-                    "message", "问题已收到：「" + context.userQuestion + "」\n\n" + getSpreadSelectionMessage()
-            ));
-        }
-
-        List<Map<String, Object>> cards = drawCards(context.spreadType);
-        String interpretationPrompt = buildInterpretationPrompt(context.userQuestion, context.spreadType, cards);
-
-        context.state = SessionState.COMPLETED;
-
-        return buildSuccessResponse(context.spreadType, context.userQuestion, cards, interpretationPrompt);
-    }
-
-    /**
      * 处理继续询问。
      */
-    private String handleContinue(SessionContext context, JsonNode arguments) throws Exception {
+    private String handleContinue(SessionContext context, JsonNode arguments, String userId) throws Exception {
         String choice = arguments.path("continue_choice").asText("").trim().toLowerCase();
 
         if ("yes".equals(choice) || "是".equals(choice)) {
@@ -483,7 +446,7 @@ public class TarotTool {
             ));
         } else if ("no".equals(choice) || "否".equals(choice)) {
             // 清除会话上下文
-            sessionContexts.remove(userId());
+            sessionContexts.remove(userId);
 
             return objectMapper.writeValueAsString(Map.of(
                     "status", "finished",
@@ -516,32 +479,7 @@ public class TarotTool {
         return map;
     }
 
-    /**
-     * 根据牌阵随机抽牌。
-     */
-    private List<Map<String, Object>> drawCards(String spreadType) {
-        List<String> positions = SPREAD_POSITIONS.get(spreadType);
-        int cardCount = positions.size();
-
-        List<String> shuffledDeck = new ArrayList<>(FULL_DECK);
-        Collections.shuffle(shuffledDeck, random);
-
-        List<Map<String, Object>> drawnCards = new ArrayList<>();
-        for (int i = 0; i < cardCount; i++) {
-            String cardName = shuffledDeck.get(i);
-            boolean isReversed = random.nextDouble() < 0.5;
-
-            drawnCards.add(Map.of(
-                    "position", positions.get(i),
-                    "card", cardName,
-                    "orientation", isReversed ? "逆位" : "正位"
-            ));
-        }
-
-        return drawnCards;
-    }
-
-    /**
+/**
      * 构建解读提示。
      */
     private String buildInterpretationPrompt(String userQuestion, String spreadType,
@@ -554,14 +492,9 @@ public class TarotTool {
         prompt.append("抽到的牌：\n");
         for (int i = 0; i < cards.size(); i++) {
             Map<String, Object> card = cards.get(i);
-            if (card.containsKey("card_number")) {
-                prompt.append(String.format("%d. %s：【%d号 %s】【%s】\n",
-                        i + 1, card.get("position"), card.get("card_number"),
-                        card.get("card"), card.get("orientation")));
-            } else {
-                prompt.append(String.format("%d. %s：【%s】【%s】\n",
-                        i + 1, card.get("position"), card.get("card"), card.get("orientation")));
-            }
+            prompt.append(String.format("%d. %s：【%d号 %s】【%s】\n",
+                    i + 1, card.get("position"), card.get("card_number"),
+                    card.get("card"), card.get("orientation")));
         }
 
         prompt.append("\n【解读要求】\n");
@@ -590,12 +523,5 @@ public class TarotTool {
                 "disclaimer", "塔罗仅作为心理参考工具，不能作为重大决策唯一依据。",
                 "continue_message", getContinueMessage()
         ));
-    }
-
-    /**
-     * 生成临时用户ID（用于日志）。
-     */
-    private String userId() {
-        return "temp_user_" + Thread.currentThread().getId();
     }
 }

@@ -181,6 +181,7 @@ public class SearchNearbyTool {
                     location, keywords, types, radius, sortrule);
 
             URI uri = buildUri(location, keywords, types, radius, sortrule);
+            //发送Get请求
             String response = restTemplate.getForObject(uri, String.class);
             JsonNode root = objectMapper.readTree(response);
 
