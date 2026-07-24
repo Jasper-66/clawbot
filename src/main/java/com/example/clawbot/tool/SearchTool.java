@@ -16,16 +16,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * 实时搜索工具 — LLM 可调用的网络搜索能力。
- *
- * <p>调用 Tavily Search API，专为 AI Agent 优化的搜索引擎。
- * 支持中文搜索，默认开启 AI 摘要，优先返回近期内容。</p>
- *
- * <h3>时效性优化</h3>
- * <p>当用户查询新闻、热点事件时，LLM 应设置 {@code days=1} 或 {@code topic="news"}
- * 以获取最新资讯。默认搜索深度为 {@code advanced}，确保结果全面。</p>
- */
+/** LLM Function Calling 工具，调用 Tavily Search API 进行实时网络搜索。 */
 @Slf4j
 @Component
 @RequiredArgsConstructor
