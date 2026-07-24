@@ -1,5 +1,6 @@
 package com.example.clawbot.service;
 
+import com.example.clawbot.tool.NewsTool;
 import com.example.clawbot.tool.WeatherTool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -28,6 +29,7 @@ public class LlmService {
 
     private final RestTemplate restTemplate;
     private final WeatherTool weatherTool;
+    private final NewsTool newsTool;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private final ConcurrentHashMap<String, LinkedList<Map<String, Object>>> conversations = new ConcurrentHashMap<>();
@@ -71,7 +73,7 @@ public class LlmService {
         requestBody.put("messages", messages);
         requestBody.put("temperature", 0.7);
         requestBody.put("max_tokens", 1024);
-        requestBody.put("tools", List.of(weatherTool.getToolDefinition()));
+        requestBody.put("tools", List.of(weatherTool.getToolDefinition(), newsTool.getToolDefinition()));
         requestBody.put("tool_choice", "auto");
 
         String reply = callLlmWithTools(requestBody, messages);
@@ -115,7 +117,11 @@ public class LlmService {
                     JsonNode function = toolCall.path("function");
                     String functionName = function.path("name").asText("");
                     String arguments = function.path("arguments").asText("{}");
-                    String toolResult = weatherTool.execute(functionName, arguments);
+                    String toolResult = switch (functionName) {
+                        case "get_weather" -> weatherTool.execute(functionName, arguments);
+                        case "get_news" -> newsTool.execute(functionName, arguments);
+                        default -> "工具调用失败：不支持的工具 " + functionName;
+                    };
                     log.info("执行工具: name={}, id={}", functionName, toolCallId);
 
                     messages.add(Map.of(
