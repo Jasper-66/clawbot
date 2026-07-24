@@ -485,11 +485,11 @@ public class SpeechService {
      */
     public String setVoice(String userId, String voiceName) {
         if (voiceName == null || voiceName.isBlank()) {
-            return "请输入音色名称，例如「切换音色Cherry」或「切换音色芊悦」。";
+            return getAvailableVoices();
         }
         String voice = findVoice(voiceName.trim());
         if (voice == null) {
-            return "未找到音色「" + voiceName.trim() + "」，发送「音色列表」查看可用音色。";
+            return "未找到音色「" + voiceName.trim() + "」。\n\n" + getAvailableVoices();
         }
         userVoices.put(userId, voice);
         String[] info = VOICE_INFO.get(voice);

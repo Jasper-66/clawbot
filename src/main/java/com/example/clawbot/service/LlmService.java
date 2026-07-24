@@ -2,6 +2,7 @@ package com.example.clawbot.service;
 
 import com.example.clawbot.tool.GeocodeTool;
 import com.example.clawbot.tool.PlanRouteTool;
+import com.example.clawbot.tool.ReminderTool;
 import com.example.clawbot.tool.SearchNearbyTool;
 import com.example.clawbot.tool.TarotTool;
 import com.example.clawbot.tool.TextToSpeechTool;
@@ -25,6 +26,8 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
 
 /**
  * 大语言模型（LLM）对话服务。
@@ -50,13 +53,14 @@ import java.util.concurrent.ConcurrentHashMap;
 @Slf4j
 @Service
 @RequiredArgsConstructor
-public class LlmService {
+public class    LlmService {
 
     /** HTTP 客户端，用于调用外部 API */
     private final RestTemplate restTemplate;
 
     /** 天气查询工具 */
     private final WeatherTool weatherTool;
+    private final ReminderTool reminderTool;
 
     /** 地理编码工具（地址转经纬度） */
     private final GeocodeTool geocodeTool;
@@ -89,6 +93,9 @@ public class LlmService {
 
     /** Function Calling 最大工具调用轮数，防止无限循环（如模型反复调用同一工具） */
     private static final int MAX_TOOL_ROUNDS = 30;
+
+    /** 默认时区 */
+    private static final ZoneId DEFAULT_ZONE = ZoneId.of("Asia/Shanghai");
 
     /** DeepSeek API 密钥 */
     @Value("${deepseek.api.key}")
@@ -156,7 +163,7 @@ public class LlmService {
 
         // 组装消息：system prompt → 历史消息 → 当前用户消息
         List<Map<String, Object>> messages = new ArrayList<>();
-        messages.add(Map.of("role", "system", "content", SYSTEM_PROMPT));
+        messages.add(Map.of("role", "system", "content", buildSystemPrompt()));
 
         synchronized (history) {
             messages.addAll(history);
@@ -175,12 +182,13 @@ public class LlmService {
                 searchNearbyTool.getToolDefinition(),
                 planRouteTool.getToolDefinition(),
                 textToSpeechTool.getToolDefinition(),
+                reminderTool.getToolDefinition(),
                 tarotTool.getToolDefinition()
         ));
         requestBody.put("tool_choice", "auto"); // 让模型自行决定是否调用
 
         // 进入 Function Calling 闭环
-        String reply = callLlmWithTools(requestBody, messages);
+        String reply = callLlmWithTools(requestBody, messages, userId);
 
         // 更新对话历史（线程安全），淘汰旧消息
         synchronized (history) {
@@ -226,7 +234,8 @@ public class LlmService {
      * @return 模型最终的文本回复；超轮数或异常时返回兜底提示
      */
     private String callLlmWithTools(Map<String, Object> requestBody,
-                                    List<Map<String, Object>> messages) {
+                                    List<Map<String, Object>> messages,
+                                    String userId) {
         try {
             for (int toolRound = 0; toolRound <= MAX_TOOL_ROUNDS; toolRound++) {
                 // 1. 调用 LLM
@@ -257,7 +266,7 @@ public class LlmService {
                     JsonNode function = toolCall.path("function");
                     String functionName = function.path("name").asText("");
                     String arguments = function.path("arguments").asText("{}");
-                    String toolResult = executeTool(functionName, arguments);
+                    String toolResult = executeTool(functionName, arguments, userId);
                     log.info("执行工具: name={}, id={}", functionName, toolCallId);
 
                     messages.add(Map.of(
@@ -275,10 +284,23 @@ public class LlmService {
     }
 
     /**
+     * 构建包含当前时间的系统提示词。
+     *
+     * @return 带时区信息的系统提示词
+     */
+    private String buildSystemPrompt() {
+        String currentTime = OffsetDateTime.now(DEFAULT_ZONE).toString();
+        return SYSTEM_PROMPT
+                + " 当前时间是 " + currentTime + "，当前时区是 Asia/Shanghai。"
+                + " 创建提醒时必须把用户表达的时间转换为带时区的 ISO 8601 格式；"
+                + "如果用户没有提供明确时间，应先询问用户。";
+    }
+
+    /**
      * 根据 LLM 返回的工具名称路由到对应的 Tool 组件执行。
      *
      * <p>使用显式的 if-else 链而非反射/Map 路由，原因是：
-     * 工具数量固定（5 个），if-else 链代码清晰、IDE 可追踪引用、
+     * 工具数量固定（6 个），if-else 链代码清晰、IDE 可追踪引用、
      * 无需额外的注册机制。如需新增工具，在此方法中添加一个 if 分支即可。</p>
      *
      * <p>每个 Tool 各自负责参数校验和异常处理，返回结果可以是
@@ -286,9 +308,10 @@ public class LlmService {
      *
      * @param functionName LLM 返回的工具名称（如 "get_weather"、"geocode"）
      * @param arguments    工具参数 JSON 字符串（如 {@code {"city":"北京"}}）
+     * @param userId       用户唯一标识（部分工具如提醒需要）
      * @return 工具执行结果字符串，找不到工具时返回错误说明
      */
-    private String executeTool(String functionName, String arguments) {
+    private String executeTool(String functionName, String arguments, String userId) {
         if (weatherTool.getToolName().equals(functionName)) {
             return weatherTool.execute(functionName, arguments);
         }
@@ -302,7 +325,10 @@ public class LlmService {
             return planRouteTool.execute(functionName, arguments);
         }
         if (textToSpeechTool.getToolName().equals(functionName)) {
-            return textToSpeechTool.execute(functionName, arguments);
+            return textToSpeechTool.execute(functionName, arguments, userId);
+        }
+        if (reminderTool.getToolName().equals(functionName)) {
+            return reminderTool.execute(functionName, arguments, userId);
         }
         if (tarotTool.getToolName().equals(functionName)) {
             return tarotTool.execute(functionName, arguments);

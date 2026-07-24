@@ -2,7 +2,9 @@ package com.example.clawbot.service;
 
 import com.example.clawbot.tool.GeocodeTool;
 import com.example.clawbot.tool.PlanRouteTool;
+import com.example.clawbot.tool.ReminderTool;
 import com.example.clawbot.tool.SearchNearbyTool;
+import com.example.clawbot.tool.TarotTool;
 import com.example.clawbot.tool.TextToSpeechTool;
 import com.example.clawbot.tool.WeatherTool;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -18,6 +20,7 @@ import org.springframework.web.client.RestTemplate;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
@@ -61,15 +64,20 @@ class LlmServiceFunctionCallingTest {
 
     /** WeatherService mock — 避免真实 HTTP 调用心知天气 API */
     private final WeatherService weatherService = mock(WeatherService.class);
-
     /** WeatherTool 使用真实实例（但其依赖的 WeatherService 已 mock） */
     private final WeatherTool weatherTool = new WeatherTool(weatherService);
 
-    /** 以下 4 个 Tool 均为 mock，本测试用例不涉及它们的功能 */
+    /** 以下 5 个 Tool 均为 mock，本测试用例不涉及它们的功能 */
     private final GeocodeTool geocodeTool = mock(GeocodeTool.class);
     private final SearchNearbyTool searchNearbyTool = mock(SearchNearbyTool.class);
     private final PlanRouteTool planRouteTool = mock(PlanRouteTool.class);
     private final TextToSpeechTool textToSpeechTool = mock(TextToSpeechTool.class);
+    private final TarotTool tarotTool = mock(TarotTool.class);
+
+    /** 提醒工具 — 使用真实实例（ReminderService 为内存实现，无需 mock） */
+    private final ReminderService reminderService = new ReminderService();
+    private final ReminderTool reminderTool = new ReminderTool(reminderService);
+
 
     private RestTemplate restTemplate;
     private MockRestServiceServer server;
@@ -85,7 +93,14 @@ class LlmServiceFunctionCallingTest {
     void setUp() {
         restTemplate = new RestTemplate();
         server = MockRestServiceServer.bindTo(restTemplate).build();
-        llmService = new LlmService(restTemplate, weatherTool, geocodeTool, searchNearbyTool, planRouteTool, textToSpeechTool);
+        llmService = new LlmService(restTemplate, weatherTool, reminderTool, geocodeTool, searchNearbyTool, planRouteTool, textToSpeechTool, tarotTool);
+
+        // Mock 工具的 getToolName() 返回非 null 值，避免 executeTool 中的 NPE
+        when(geocodeTool.getToolName()).thenReturn("geocode");
+        when(searchNearbyTool.getToolName()).thenReturn("search_nearby");
+        when(planRouteTool.getToolName()).thenReturn("plan_route");
+        when(textToSpeechTool.getToolName()).thenReturn("text_to_speech");
+        when(tarotTool.getToolName()).thenReturn("tarot");
 
         // 通过反射注入配置值（避免依赖 Spring 容器和 application.properties）
         ReflectionTestUtils.setField(llmService, "apiKey", "test-key");
@@ -186,6 +201,125 @@ class LlmServiceFunctionCallingTest {
         verify(weatherService).getWeather("杭州");
 
         // 验证所有预期的 API 请求都已发送
+        server.verify();
+    }
+
+    @Test
+    void shouldCreateReminderThroughFunctionCalling() {
+        server.expect(requestTo(CHAT_URL))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(request -> {
+                    JsonNode body = readBody(((MockClientHttpRequest) request).getBodyAsBytes());
+                    // reminderTool 在 tools 数组中位于索引 5（最后一个）
+                    JsonNode tools = body.path("tools");
+                    assertThat(tools.get(5).path("function").path("name").asText())
+                            .isEqualTo(reminderTool.getToolName());
+                })
+                .andRespond(withSuccess("""
+                        {
+                          "choices": [{
+                            "finish_reason": "tool_calls",
+                            "message": {
+                              "role": "assistant",
+                              "content": null,
+                              "tool_calls": [{
+                                "id": "call_reminder_1",
+                                "type": "function",
+                                "function": {
+                                  "name": "create_reminder",
+                                  "arguments": "{\\"content\\":\\"参加会议\\",\\"trigger_at\\":\\"2099-01-01T08:00:00+08:00\\",\\"reminder_type\\":\\"text\\"}"
+                                }
+                              }]
+                            }
+                          }]
+                        }
+                        """, MediaType.APPLICATION_JSON));
+
+        server.expect(requestTo(CHAT_URL))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(request -> {
+                    JsonNode body = readBody(((MockClientHttpRequest) request).getBodyAsBytes());
+                    JsonNode messages = body.path("messages");
+                    JsonNode toolResult = objectMapper.readTree(
+                            messages.get(messages.size() - 1).path("content").asText());
+
+                    assertThat(messages.get(messages.size() - 1).path("tool_call_id").asText())
+                            .isEqualTo("call_reminder_1");
+                    assertThat(toolResult.path("success").asBoolean()).isTrue();
+                    assertThat(toolResult.path("reminder_type").asText()).isEqualTo("text");
+                })
+                .andRespond(withSuccess("""
+                        {
+                          "choices": [{
+                            "finish_reason": "stop",
+                            "message": {
+                              "role": "assistant",
+                              "content": "好的，已设置会议提醒。"
+                            }
+                          }]
+                        }
+                        """, MediaType.APPLICATION_JSON));
+
+        String reply = llmService.chat("user-2", "2099年1月1日上午8点提醒我参加会议");
+
+        assertThat(reply).isEqualTo("好的，已设置会议提醒。");
+        assertThat(reminderService.getDueReminders(Instant.parse("2100-01-01T00:00:00Z")))
+                .singleElement()
+                .satisfies(task -> {
+                    assertThat(task.userId()).isEqualTo("user-2");
+                    assertThat(task.content()).isEqualTo("参加会议");
+                });
+        server.verify();
+    }
+
+    @Test
+    void shouldPassWechatUserIdToTextToSpeechTool() {
+        String arguments = "{\"text\":\"你好\"}";
+        when(textToSpeechTool.execute("text_to_speech", arguments, "voice-user"))
+                .thenReturn("""
+                        {"format":"wav","size":1024,"file_path":"D:\\\\audio_cache\\\\voice.wav"}
+                        """.trim());
+
+        server.expect(requestTo(CHAT_URL))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withSuccess("""
+                        {
+                          "choices": [{
+                            "finish_reason": "tool_calls",
+                            "message": {
+                              "role": "assistant",
+                              "content": null,
+                              "tool_calls": [{
+                                "id": "call_tts_1",
+                                "type": "function",
+                                "function": {
+                                  "name": "text_to_speech",
+                                  "arguments": "{\\"text\\":\\"你好\\"}"
+                                }
+                              }]
+                            }
+                          }]
+                        }
+                        """, MediaType.APPLICATION_JSON));
+
+        server.expect(requestTo(CHAT_URL))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withSuccess("""
+                        {
+                          "choices": [{
+                            "finish_reason": "stop",
+                            "message": {
+                              "role": "assistant",
+                              "content": "[audio:D:\\\\audio_cache\\\\voice.wav]"
+                            }
+                          }]
+                        }
+                        """, MediaType.APPLICATION_JSON));
+
+        String reply = llmService.chat("voice-user", "请用语音说你好");
+
+        assertThat(reply).isEqualTo("[audio:D:\\audio_cache\\voice.wav]");
+        verify(textToSpeechTool).execute("text_to_speech", arguments, "voice-user");
         server.verify();
     }
 
