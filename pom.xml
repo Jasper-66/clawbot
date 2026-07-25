@@ -31,6 +31,7 @@
         <maven.compiler.release>17</maven.compiler.release>
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
+        <lombok.version>1.18.34</lombok.version>
     </properties>
     <dependencies>
         <dependency>
@@ -76,6 +77,13 @@
             <groupId>org.apache.poi</groupId>
             <artifactId>poi-ooxml</artifactId>
             <version>5.2.5</version>
+        </dependency>
+
+        <!-- 中国农历/黄历计算 -->
+        <dependency>
+            <groupId>cn.6tail</groupId>
+            <artifactId>lunar</artifactId>
+            <version>1.3.13</version>
         </dependency>
 
     </dependencies>

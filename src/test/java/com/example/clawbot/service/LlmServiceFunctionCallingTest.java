@@ -3,6 +3,8 @@ package com.example.clawbot.service;
 import com.example.clawbot.tool.GeocodeTool;
 import com.example.clawbot.tool.PlanRouteTool;
 import com.example.clawbot.tool.SearchNearbyTool;
+import com.example.clawbot.tool.CalendarTool;
+import com.example.clawbot.tool.TarotTool;
 import com.example.clawbot.tool.TextToSpeechTool;
 import com.example.clawbot.tool.WeatherTool;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -35,7 +37,7 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
  *
  * <h3>测试架构</h3>
  * <p>通过 MockRestServiceServer 拦截 {@link RestTemplate} 的 HTTP 请求并返回预设 JSON，
- * 无需真实网络连接。除 WeatherService 外，其余 4 个 Tool 均使用 Mockito mock，
+ * 无需真实网络连接。除 WeatherService 外，其余 7 个 Tool 均使用 Mockito mock，
  * 因为该测试用例仅验证天气工具的调用链路。</p>
  *
  * <h3>测试场景：天气查询</h3>
@@ -65,11 +67,13 @@ class LlmServiceFunctionCallingTest {
     /** WeatherTool 使用真实实例（但其依赖的 WeatherService 已 mock） */
     private final WeatherTool weatherTool = new WeatherTool(weatherService);
 
-    /** 以下 4 个 Tool 均为 mock，本测试用例不涉及它们的功能 */
+    /** 以下 7 个 Tool 均为 mock，本测试用例不涉及它们的功能 */
     private final GeocodeTool geocodeTool = mock(GeocodeTool.class);
     private final SearchNearbyTool searchNearbyTool = mock(SearchNearbyTool.class);
     private final PlanRouteTool planRouteTool = mock(PlanRouteTool.class);
     private final TextToSpeechTool textToSpeechTool = mock(TextToSpeechTool.class);
+    private final TarotTool tarotTool = mock(TarotTool.class);
+    private final CalendarTool calendarTool = mock(CalendarTool.class);
 
     private RestTemplate restTemplate;
     private MockRestServiceServer server;
@@ -85,7 +89,7 @@ class LlmServiceFunctionCallingTest {
     void setUp() {
         restTemplate = new RestTemplate();
         server = MockRestServiceServer.bindTo(restTemplate).build();
-        llmService = new LlmService(restTemplate, weatherTool, geocodeTool, searchNearbyTool, planRouteTool, textToSpeechTool);
+        llmService = new LlmService(restTemplate, weatherTool, geocodeTool, searchNearbyTool, planRouteTool, textToSpeechTool, tarotTool, calendarTool);
 
         // 通过反射注入配置值（避免依赖 Spring 容器和 application.properties）
         ReflectionTestUtils.setField(llmService, "apiKey", "test-key");

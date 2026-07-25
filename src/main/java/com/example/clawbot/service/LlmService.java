@@ -3,6 +3,7 @@ package com.example.clawbot.service;
 import com.example.clawbot.tool.GeocodeTool;
 import com.example.clawbot.tool.PlanRouteTool;
 import com.example.clawbot.tool.SearchNearbyTool;
+import com.example.clawbot.tool.CalendarTool;
 import com.example.clawbot.tool.TarotTool;
 import com.example.clawbot.tool.TextToSpeechTool;
 import com.example.clawbot.tool.WeatherTool;
@@ -34,7 +35,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * <h3>功能特性</h3>
  * <ul>
  *   <li><b>多轮对话</b>：每个用户独立维护最近 10 轮对话历史</li>
- *   <li><b>工具调用</b>：支持天气查询、地理编码、周边搜索、路线规划、语音合成、塔罗占卜等工具</li>
+ *   <li><b>工具调用</b>：支持天气查询、地理编码、周边搜索、路线规划、语音合成、塔罗占卜、日历查询等工具</li>
  *   <li><b>图片识别</b>：通过多模态 Vision API 分析用户发送的图片内容</li>
  * </ul>
  *
@@ -46,6 +47,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * @see com.example.clawbot.tool.PlanRouteTool
  * @see com.example.clawbot.tool.TextToSpeechTool
  * @see com.example.clawbot.tool.TarotTool
+ * @see com.example.clawbot.tool.CalendarTool
  */
 @Slf4j
 @Service
@@ -72,6 +74,9 @@ public class LlmService {
 
     /** 塔罗占卜工具 */
     private final TarotTool tarotTool;
+
+    /** 日历查询工具（黄历/节假日/放假安排） */
+    private final CalendarTool calendarTool;
 
     /** JSON 解析器 */
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -129,7 +134,12 @@ public class LlmService {
                     + "【重要规则】当用户明确要求语音回复、朗读、播报、讲故事/笑话等需要以语音形式呈现内容时，"
                     + "你必须先生成回复内容，然后调用 text_to_speech 工具将内容转为语音。"
                     + "调用工具后，在最终回复中保留 [audio:工具返回的file_path] 标记，以便系统发送语音给用户。\n"
-                    + "如果用户没有要求语音，不要主动调用 text_to_speech 工具。";
+                    + "如果用户没有要求语音，不要主动调用 text_to_speech 工具。\n"
+                    + "【医疗科普】当用户询问医疗健康、疾病预防、症状科普、健康生活方式、医学常识等问题时，"
+                    + "你可以直接回答，但必须遵守以下规则：\n"
+                    + "1. 仅提供科普知识，严禁提供诊断、处方、用药建议或治疗方案\n"
+                    + "2. 回复开头必须加上：【仅供科普参考，不能替代医师诊断，身体不适请及时就医】\n"
+                    + "3. 如用户询问具体的诊断或治疗问题，请引导其前往医院就诊";
 
     /**
      * 文本对话入口（面向 WeChatBotService 的主接口）。
@@ -138,7 +148,7 @@ public class LlmService {
      * <ol>
      *   <li>从 {@code conversations} Map 获取或创建该用户的对话历史（{@link LinkedList}）</li>
      *   <li>组装消息列表：系统提示词 → 历史消息（最多 {@value #MAX_HISTORY} 轮）→ 当前用户消息</li>
-     *   <li>在请求中注册全部 5 个工具定义，设置 {@code tool_choice: "auto"} 让模型自行决定是否调用</li>
+     *   <li>在请求中注册全部 8 个工具定义，设置 {@code tool_choice: "auto"} 让模型自行决定是否调用</li>
      *   <li>调用 {@link #callLlmWithTools} 进入 Function Calling 闭环</li>
      *   <li>将本轮用户消息和助手最终回复追加到历史，超出上限则淘汰最早的一轮</li>
      * </ol>
@@ -151,12 +161,19 @@ public class LlmService {
      * @return 助手回复文本，可直接发送给用户；异常时返回友好的错误提示而非抛异常
      */
     public String chat(String userId, String userMessage) {
+        log.info("========== 新对话开始 ==========");
+        log.info("用户 [{}]: {}", userId, userMessage);
+        log.info("Function Calling 调度模型: {} ({}{})", model,
+                baseUrl.endsWith("/") ? baseUrl : baseUrl + "/", "v1/chat/completions");
+
         // 获取或创建该用户的对话历史列表
         LinkedList<Map<String, Object>> history = conversations.computeIfAbsent(userId, k -> new LinkedList<>());
 
-        // 组装消息：system prompt → 历史消息 → 当前用户消息
+        // 组装消息：system prompt（含当前日期） → 历史消息 → 当前用户消息
+        String today = java.time.LocalDate.now().toString();
+        String systemContent = SYSTEM_PROMPT + "\n当前日期：" + today + "，请基于此日期回答用户关于时间、日期的问题。";
         List<Map<String, Object>> messages = new ArrayList<>();
-        messages.add(Map.of("role", "system", "content", SYSTEM_PROMPT));
+        messages.add(Map.of("role", "system", "content", systemContent));
 
         synchronized (history) {
             messages.addAll(history);
@@ -175,7 +192,8 @@ public class LlmService {
                 searchNearbyTool.getToolDefinition(),
                 planRouteTool.getToolDefinition(),
                 textToSpeechTool.getToolDefinition(),
-                tarotTool.getToolDefinition()
+                tarotTool.getToolDefinition(),
+                calendarTool.getToolDefinition()
         ));
         requestBody.put("tool_choice", "auto"); // 让模型自行决定是否调用
 
@@ -190,6 +208,10 @@ public class LlmService {
                 history.removeFirst();
             }
         }
+
+        log.info("---------- 最终回复给用户 ----------");
+        log.info("回复内容: {}", reply.trim());
+        log.info("========== 对话结束 ==========");
 
         return reply.trim();
     }
@@ -236,6 +258,9 @@ public class LlmService {
                 // 2. 无工具调用 → 模型已完成回答
                 if (!toolCalls.isArray() || toolCalls.isEmpty()) {
                     String content = assistant.path("content").asText("").trim();
+                    if (!content.isEmpty()) {
+                        log.info("[{}] 生成最终回复 (无工具调用)", model);
+                    }
                     return content.isEmpty() ? "抱歉，我没有生成有效回复，请稍后再试。" : content;
                 }
 
@@ -257,8 +282,11 @@ public class LlmService {
                     JsonNode function = toolCall.path("function");
                     String functionName = function.path("name").asText("");
                     String arguments = function.path("arguments").asText("{}");
+
+                    log.info("┌─ [{}] 决定调用工具: {}(参数: {})", model, functionName, arguments);
                     String toolResult = executeTool(functionName, arguments);
-                    log.info("执行工具: name={}, id={}", functionName, toolCallId);
+                    log.info("└─ 工具 [{}] 执行结果: {}", functionName,
+                            toolResult.length() > 200 ? toolResult.substring(0, 200) + "..." : toolResult);
 
                     messages.add(Map.of(
                             "role", "tool",
@@ -269,7 +297,7 @@ public class LlmService {
             }
             return "抱歉，我暂时无法处理，请稍后再试。";
         } catch (Exception e) {
-            log.error("Function Calling 调用失败", e);
+            log.error("Function Calling 调用失败: {}", e.getMessage(), e);
             return "抱歉，我暂时无法处理，请稍后再试。";
         }
     }
@@ -278,7 +306,7 @@ public class LlmService {
      * 根据 LLM 返回的工具名称路由到对应的 Tool 组件执行。
      *
      * <p>使用显式的 if-else 链而非反射/Map 路由，原因是：
-     * 工具数量固定（5 个），if-else 链代码清晰、IDE 可追踪引用、
+     * 工具数量固定（8 个），if-else 链代码清晰、IDE 可追踪引用、
      * 无需额外的注册机制。如需新增工具，在此方法中添加一个 if 分支即可。</p>
      *
      * <p>每个 Tool 各自负责参数校验和异常处理，返回结果可以是
@@ -306,6 +334,9 @@ public class LlmService {
         }
         if (tarotTool.getToolName().equals(functionName)) {
             return tarotTool.execute(functionName, arguments);
+        }
+        if (calendarTool.getToolName().equals(functionName)) {
+            return calendarTool.execute(functionName, arguments);
         }
         return "工具调用失败：未找到工具 " + functionName;
     }
@@ -368,7 +399,7 @@ public class LlmService {
         headers.setBearerAuth(key);
 
         String requestJson = objectMapper.writeValueAsString(requestBody);
-        log.info("LLM 请求: model={}, url={}", requestBody.get("model"), apiUrl);
+        log.info("→ 调用 LLM: model={}, endpoint={}/v1/chat/completions", requestBody.get("model"), apiUrl);
         HttpEntity<String> entity = new HttpEntity<>(requestJson, headers);
         ResponseEntity<String> response = restTemplate.postForEntity(
                 apiUrl + "/v1/chat/completions", entity, String.class);
@@ -387,6 +418,25 @@ public class LlmService {
         if (!choices.isArray() || choices.isEmpty()
                 || choices.get(0).path("message").isMissingNode()) {
             throw new IllegalStateException("LLM 响应缺少 choices[0].message");
+        }
+
+        // 打印 LLM 响应摘要
+        JsonNode message = choices.get(0).path("message");
+        String finishReason = choices.get(0).path("finish_reason").asText("");
+        if (message.has("tool_calls") && message.path("tool_calls").isArray()) {
+            int toolCount = message.path("tool_calls").size();
+            StringBuilder toolNames = new StringBuilder();
+            for (JsonNode tc : message.path("tool_calls")) {
+                if (toolNames.length() > 0) toolNames.append(", ");
+                toolNames.append(tc.path("function").path("name").asText(""));
+            }
+            log.info("← LLM 响应: 决定调用 {} 个工具 [{}] (finish_reason={})",
+                    toolCount, toolNames, finishReason);
+        } else {
+            String contentPreview = message.path("content").asText("");
+            log.info("← LLM 响应: 直接回复 (finish_reason={}), 内容: {}",
+                    finishReason,
+                    contentPreview.length() > 100 ? contentPreview.substring(0, 100) + "..." : contentPreview);
         }
         return choices.get(0).path("message");
     }
@@ -430,9 +480,11 @@ public class LlmService {
                 "image_url", Map.of("url", dataUrl)
         ));
 
-        // 组装完整消息列表
+        // 组装完整消息列表（含当前日期）
+        String today = java.time.LocalDate.now().toString();
+        String systemContent = SYSTEM_PROMPT + "\n当前日期：" + today + "，请基于此日期回答用户关于时间、日期的问题。";
         List<Map<String, Object>> messages = new ArrayList<>();
-        messages.add(Map.of("role", "system", "content", SYSTEM_PROMPT));
+        messages.add(Map.of("role", "system", "content", systemContent));
 
         LinkedList<Map<String, Object>> history = conversations.get(userId);
         if (history != null) {
