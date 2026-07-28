@@ -30,12 +30,24 @@ public class PlanRouteTool {
     @Value("${amap.api.key}")
     private String amapApiKey;
 
+    private static final String NAME = "plan_route";
+    private static final String DESCRIPTION = "规划从起点到终点的驾车路线。起点由 location 参数指定（经纬度格式），终点通过 keywords 或 types 搜索周边 POI 确定或直接指定 destination。若用户只提供地址，应先调用 geocode 工具转换为经纬度。";
     private static final int DEFAULT_RADIUS = 3000;
+    /** 最大搜索半径（米），防止无意义的大范围搜索 */
     private static final int MAX_RADIUS = 50000;
     private static final String AMAP_DIRECTION_URL = "https://restapi.amap.com/v3/direction/driving";
     private static final String AMAP_PLACE_AROUND_URL = "https://restapi.amap.com/v3/place/around";
 
-    @Tool(name = "plan_route", description = "规划从起点到终点的路线。起点由 location 参数指定（经纬度格式），终点通过 keywords 或 types 搜索周边 POI 确定。若用户只提供地址，应先调用 geocode 工具转换为经纬度。")
+    /**
+     * 获取工具名称。
+     *
+     * @return 工具标识名 "plan_route"
+     */
+    public String getToolName() {
+        return NAME;
+    }
+
+    @Tool(name = "plan_route", description = "规划从起点到终点的驾车路线。起点由 location 参数指定（经纬度格式），终点通过 keywords 或 types 搜索周边 POI 确定或直接指定 destination。若用户只提供地址，应先调用 geocode 工具转换为经纬度。")
     public String planRoute(
             @ToolParam(description = "起点经纬度，格式 经度,纬度（如 116.473168,39.993015）。若用户只提供地址，应先调用 geocode 工具转换为此格式。") String location,
             @ToolParam(required = false, description = "终点关键词，用于搜索周边 POI，如 火锅、咖啡、游乐园") String keywords,
@@ -90,6 +102,77 @@ public class PlanRouteTool {
             log.error("[观察] 调用失败 plan_route(): origin={}, destination={}, 原因: {}, 建议: 检查高德地图 API 密钥和参数格式",
                     origin, effectiveDestination, e.getMessage(), e);
             return "工具调用失败：路线规划异常: " + e.getMessage();
+        }
+    }
+
+    /**
+     * 获取工具定义（OpenAI Function Calling 格式）。
+     *
+     * @return Function Calling 格式的工具定义 Map
+     */
+    public Map<String, Object> getToolDefinition() {
+        return Map.of(
+                "type", "function",
+                "function", Map.of(
+                        "name", NAME,
+                        "description", DESCRIPTION,
+                        "parameters", Map.of(
+                                "type", "object",
+                                "properties", Map.of(
+                                        "location", Map.of(
+                                                "type", "string",
+                                                "description", "起点经纬度，格式 经度,纬度（如 116.473168,39.993015）。若用户只提供地址，应先调用 geocode 工具转换为此格式。"
+                                        ),
+                                        "keywords", Map.of(
+                                                "type", "string",
+                                                "description", "终点关键词，用于搜索周边 POI，如 火锅、咖啡、游乐园"
+                                        ),
+                                        "types", Map.of(
+                                                "type", "string",
+                                                "description", "POI 类型编码，多个用英文逗号 , 分隔，如 050301,050302"
+                                        ),
+                                        "radius", Map.of(
+                                                "type", "integer",
+                                                "description", "搜索半径，单位米，最大 50000，默认 3000"
+                                        ),
+                                        "sortrule", Map.of(
+                                                "type", "string",
+                                                "description", "排序规则：distance=按距离排序（默认），weight=综合排序",
+                                                "enum", List.of("distance", "weight")
+                                        ),
+                                        "destination", Map.of(
+                                                "type", "string",
+                                                "description", "终点经纬度，格式 经度,纬度。若提供此参数，将直接规划路线，不再搜索周边 POI。"
+                                        )
+                                ),
+                                "required", List.of("location")
+                        )
+                )
+        );
+    }
+
+    /**
+     * 校验并执行模型返回的工具调用。
+     *
+     * @param functionName  工具名称
+     * @param argumentsJson LLM 生成的参数 JSON
+     * @return 路线规划结果 JSON（包含 distance、duration、steps），或错误信息
+     */
+    public String execute(String functionName, String argumentsJson) {
+        if (!NAME.equals(functionName)) {
+            return "工具调用失败：不支持的工具 " + functionName;
+        }
+        try {
+            JsonNode arguments = objectMapper.readTree(argumentsJson);
+            String location = arguments.path("location").asText("").trim();
+            String keywords = arguments.path("keywords").asText("").trim();
+            String types = arguments.path("types").asText("").trim();
+            int radius = arguments.path("radius").asInt(DEFAULT_RADIUS);
+            String sortrule = arguments.path("sortrule").asText("distance").trim();
+            String destination = arguments.path("destination").asText("").trim();
+            return planRoute(location, keywords, types, radius, sortrule, destination);
+        } catch (Exception e) {
+            return "工具调用失败：arguments 不是有效的 JSON";
         }
     }
 

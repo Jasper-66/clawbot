@@ -20,6 +20,8 @@ public class TarotTool {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Random random = new Random();
 
+    private static final String NAME = "tarot_reading";
+
     private static final List<String> MAJOR_ARCANA = List.of(
             "愚者", "魔术师", "女祭司", "女皇", "皇帝", "教皇", "恋人", "战车",
             "力量", "隐士", "命运之轮", "正义", "倒吊人", "死神", "节制", "恶魔",
@@ -99,6 +101,15 @@ public class TarotTool {
 
     private final Map<String, SessionContext> sessionContexts = new ConcurrentHashMap<>();
 
+    /**
+     * 获取工具名称。
+     *
+     * @return 工具标识名 "tarot_reading"
+     */
+    public String getToolName() {
+        return NAME;
+    }
+
     @Tool(name = "tarot_reading", description = "韦特塔罗牌专业解读。当用户想要占卜、算命、预测未来、寻求指引时使用此工具。采用多阶段交互：先输入问题，再选择牌阵，最后选择牌码进行抽牌。")
     public String tarotReading(
             @ToolParam(description = "操作类型：start（开始新的占卜流程）、select_spread（选择牌阵）、draw（用户选择数字进行抽牌）、continue（询问是否继续占卜）") String action,
@@ -145,6 +156,88 @@ public class TarotTool {
         }
     }
 
+    /**
+     * 获取工具定义（OpenAI Function Calling 格式）。
+     *
+     * @return Function Calling 格式的工具定义 Map
+     */
+    public Map<String, Object> getToolDefinition() {
+        return Map.of(
+                "type", "function",
+                "function", Map.of(
+                        "name", NAME,
+                        "description", "韦特塔罗牌专业解读。当用户想要占卜、算命、预测未来、寻求指引时使用此工具。" +
+                                "采用多阶段交互：先输入问题，再选择牌阵，最后选择牌码（支持自主抽牌或随机抽牌）。",
+                        "parameters", Map.of(
+                                "type", "object",
+                                "properties", Map.of(
+                                        "action", Map.of(
+                                                "type", "string",
+                                                "description", "操作类型：" +
+                                                        "- 'start'：开始新的占卜流程 " +
+                                                        "- 'select_spread'：选择牌阵 " +
+                                                        "- 'draw'：用户选择牌码进行抽牌 " +
+                                                        "- 'random'：随机抽牌 " +
+                                                        "- 'continue'：询问是否继续占卜",
+                                                "enum", List.of("start", "select_spread", "draw", "random", "continue")
+                                        ),
+                                        "user_id", Map.of(
+                                                "type", "string",
+                                                "description", "用户唯一标识，用于会话状态管理"
+                                        ),
+                                        "user_question", Map.of(
+                                                "type", "string",
+                                                "description", "用户想要占卜的具体问题"
+                                        ),
+                                        "spread_type", Map.of(
+                                                "type", "string",
+                                                "description", "选择的牌阵类型：single(单牌), three_timeline(三牌时序), love_triangle(爱情三角), decision(二选一), celtic_cross(凯尔特十字)"
+                                        ),
+                                        "selected_codes", Map.of(
+                                                "type", "string",
+                                                "description", "用户选择的牌码，用空格分隔，如 '7 22 19'"
+                                        ),
+                                        "continue_choice", Map.of(
+                                                "type", "string",
+                                                "description", "是否继续占卜：'yes' 继续，'no' 结束"
+                                        )
+                                ),
+                                "required", List.of("action", "user_id")
+                        )
+                )
+        );
+    }
+
+    /**
+     * 校验并执行 LLM 请求的工具调用。
+     *
+     * @param functionName  工具名称
+     * @param argumentsJson LLM 生成的参数 JSON
+     * @return 塔罗占卜结果 JSON，或错误信息
+     */
+    public String execute(String functionName, String argumentsJson) {
+        if (!NAME.equals(functionName)) {
+            return "工具调用失败：不支持的工具 " + functionName;
+        }
+        try {
+            JsonNode arguments = objectMapper.readTree(argumentsJson);
+            String action = arguments.path("action").asText("").trim();
+            String userId = arguments.path("user_id").asText("").trim();
+            String userQuestion = arguments.path("user_question").asText(null);
+            String spreadType = arguments.path("spread_type").asText(null);
+            String selectedCodes = arguments.path("selected_codes").asText(null);
+            String continueChoice = arguments.path("continue_choice").asText(null);
+            return tarotReading(action, userId, userQuestion, spreadType, selectedCodes, continueChoice);
+        } catch (Exception e) {
+            return "工具调用失败：arguments 不是有效的 JSON";
+        }
+    }
+
+    /**
+     * 获取牌阵选择列表文本。
+     *
+     * @return 牌阵列表说明
+     */
     public String getSpreadSelectionMessage() {
         StringBuilder sb = new StringBuilder("🔮 请选择牌阵：\n\n");
         int i = 1;
