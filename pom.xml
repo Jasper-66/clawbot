@@ -27,19 +27,13 @@
         <url/>
     </scm>
     <properties>
-<<<<<<< HEAD
         <java.version>21</java.version>
         <maven.compiler.release>21</maven.compiler.release>
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
-=======
-        <java.version>17</java.version>
-        <maven.compiler.release>17</maven.compiler.release>
-        <maven.compiler.source>17</maven.compiler.source>
-        <maven.compiler.target>17</maven.compiler.target>
->>>>>>> main
         <spring-ai.version>1.0.0-M6</spring-ai.version>
     </properties>
+
     <dependencyManagement>
         <dependencies>
             <dependency>
@@ -77,35 +71,23 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-<<<<<<< HEAD
-
-
-
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-web</artifactId>
-        </dependency>
-
-        <dependency>
-=======
->>>>>>> main
             <groupId>io.github.lith0924</groupId>
             <artifactId>wechat-ilink-sdk</artifactId>
             <version>2.1.0</version>
         </dependency>
 
-        <!-- ③ Spring AI 核心（ChatMemory 接口在这里） -->
+        <!-- Spring AI 核心（ChatMemory 接口在这里） -->
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-core</artifactId>
-            <version>1.0.0-M6</version>
         </dependency>
 
-        <!-- ④ Spring AI OpenAI Starter（ChatClient 在这里，兼容 DeepSeek） -->
+        <!-- Spring AI OpenAI Starter（ChatClient 在这里，兼容 DeepSeek） -->
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-openai-spring-boot-starter</artifactId>
-            <version>1.0.0-M6</version>
         </dependency>
+
         <!-- PDF 文本提取 -->
         <dependency>
             <groupId>org.apache.pdfbox</groupId>
@@ -120,13 +102,6 @@
             <version>5.2.5</version>
         </dependency>
 
-        <!-- Spring AI - OpenAI Starter (DeepSeek 兼容) -->
-        <dependency>
-            <groupId>org.springframework.ai</groupId>
-            <artifactId>spring-ai-openai-spring-boot-starter</artifactId>
-            <version>${spring-ai.version}</version>
-        </dependency>
-
         <!-- Redis 长期记忆存储 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -136,24 +111,8 @@
             <groupId>org.apache.commons</groupId>
             <artifactId>commons-pool2</artifactId>
         </dependency>
-
     </dependencies>
 
-<<<<<<< HEAD
-=======
-    <dependencyManagement>
-        <dependencies>
-            <dependency>
-                <groupId>org.springframework.ai</groupId>
-                <artifactId>spring-ai-bom</artifactId>
-                <version>${spring-ai.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
-        </dependencies>
-    </dependencyManagement>
-
->>>>>>> main
     <repositories>
         <repository>
             <id>spring-milestones</id>
@@ -163,7 +122,6 @@
                 <enabled>false</enabled>
             </snapshots>
         </repository>
-<<<<<<< HEAD
         <repository>
             <id>spring-snapshots</id>
             <name>Spring Snapshots</name>
@@ -172,8 +130,6 @@
                 <enabled>false</enabled>
             </releases>
         </repository>
-=======
->>>>>>> main
     </repositories>
 
     <build>

@@ -7,6 +7,11 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
+import org.springframework.web.client.RestClient;
+
+import java.net.http.HttpClient;
+import java.time.Duration;
 
 /**
  * 多 ChatModel 配置：DeepSeek（对话+工具调用）和 DashScope（Vision 图片识别）。
@@ -16,6 +21,15 @@ import org.springframework.context.annotation.Primary;
  */
 @Configuration
 public class MultiChatModelConfig {
+
+    private static RestClient.Builder restClientBuilder() {
+        HttpClient httpClient = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(30))
+                .build();
+        return RestClient.builder()
+                .requestFactory(new JdkClientHttpRequestFactory(httpClient));
+    }
 
     /** DeepSeek ChatModel — 主模型，用于对话和 Tool Calling */
     @Primary
@@ -28,6 +42,7 @@ public class MultiChatModelConfig {
                 .openAiApi(OpenAiApi.builder()
                         .baseUrl(baseUrl)
                         .apiKey(apiKey)
+                        .restClientBuilder(restClientBuilder())
                         .build())
                 .defaultOptions(OpenAiChatOptions.builder()
                         .model(model)
@@ -47,6 +62,7 @@ public class MultiChatModelConfig {
                 .openAiApi(OpenAiApi.builder()
                         .baseUrl(baseUrl)
                         .apiKey(apiKey)
+                        .restClientBuilder(restClientBuilder())
                         .build())
                 .defaultOptions(OpenAiChatOptions.builder()
                         .model(model)
