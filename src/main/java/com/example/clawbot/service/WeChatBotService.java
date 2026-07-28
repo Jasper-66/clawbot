@@ -16,6 +16,8 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
+import com.example.clawbot.service.ThinkingLogBuilder;
+
 /**
  * 微信机器人核心服务 — 系统的"神经中枢"。
  *
@@ -75,6 +77,9 @@ public class WeChatBotService {
     /** 文件总结服务 — 提取文件内容并通过 LLM 生成摘要 */
     private final FileSummaryService fileSummaryService;
 
+    /** 调度服务 — 管理定时提醒和周期任务 */
+    private final SchedulerService schedulerService;
+
     /** ILink 微信客户端 — 底层 SDK，负责与微信服务器通信 */
     private ILinkClient client;
 
@@ -128,6 +133,9 @@ public class WeChatBotService {
                             .heartbeatEnabled(true)
                             .build())
                     .build();
+
+            // 设置调度服务的消息推送回调
+            schedulerService.setMessageSender(this::sendReply);
 
             // 获取登录二维码（文本形式，可在终端/日志中扫码）
             String qrContent = client.executeLogin();
@@ -245,7 +253,13 @@ public class WeChatBotService {
                 log.info("收到图片 from={}", fromUser);
                 try {
                     byte[] imageBytes = client.downloadImageFromMessageItem(item);
-                    sendReply(fromUser, llmService.chatWithImage(fromUser, imageBytes, "image.jpg"));
+                    String imageLog = ThinkingLogBuilder.buildSimple("图片消息",
+                            "🔍 分析意图：图片识别请求",
+                            "📥 下载图片",
+                            "🤖 调用 DashScope Vision API（多模态识别）",
+                            "💡 决策：分析图片内容并返回描述");
+                    String imageReply = llmService.chatWithImage(fromUser, imageBytes, "image.jpg");
+                    sendReply(fromUser, imageLog + "\n\n💬 回复：\n" + imageReply);
                 } catch (Exception e) {
                     log.error("下载或识别图片失败", e);
                     sendReply(fromUser, "抱歉，图片处理失败，请稍后再试。");
@@ -409,9 +423,18 @@ public class WeChatBotService {
         try {
             String prompt = extractImagePrompt(text);
             log.info("图片生成请求: prompt={}", prompt);
+
+            String thinkingLog = ThinkingLogBuilder.buildSimple(text,
+                    "🔍 分析意图：图片生成请求",
+                    "📝 提取提示词：\"" + prompt + "\"",
+                    "🤖 调用智谱 CogView-3-Plus API 生成图片",
+                    "💡 决策：生成图片并发送给用户");
+
             byte[] imageBytes = imageGenerationService.generateImage(prompt);
             client.sendImage(fromUser, imageBytes, "generated.png", "image/png");
             log.info("图片已发送给 {}", fromUser);
+
+            sendReply(fromUser, thinkingLog);
         } catch (Exception e) {
             log.error("图片生成失败", e);
             try {
@@ -482,9 +505,18 @@ public class WeChatBotService {
         try {
             // 发送输入状态提示
             client.sendTextWithTyping(fromUser, "正在生成语音...", 500);
+
+            String thinkingLog = ThinkingLogBuilder.buildSimple(textToRead,
+                    "🔍 分析意图：TTS 语音合成请求",
+                    "📝 提取待朗读文本：\"" + truncate(textToRead, 50) + "\"",
+                    "🤖 调用 DashScope TTS API（qwen3-tts-flash）",
+                    "💡 决策：生成 WAV 音频文件并发送");
+
             byte[] audioData = speechService.textToSpeech(fromUser, textToRead);
             client.sendFile(fromUser, audioData, "语音播报.wav", "");
             log.info("语音文件已发送给 {}", fromUser);
+
+            sendReply(fromUser, thinkingLog);
         } catch (Exception e) {
             log.error("TTS 失败", e);
             sendReply(fromUser, "语音生成失败，请稍后再试。");
@@ -525,10 +557,21 @@ public class WeChatBotService {
             if (encodeType != null && encodeType == 4) fileName = "voice.sil";   // SILK
             else if (encodeType != null && encodeType == 0) fileName = "voice.wav"; // WAV
 
+            String thinkingLog = ThinkingLogBuilder.buildSimple("语音消息",
+                    "🔍 分析意图：语音消息",
+                    "📥 下载语音文件（格式：" + fileName + "）",
+                    "🤖 调用 DashScope ASR API（qwen3-asr-flash）进行语音识别");
+
             // ASR 识别
             String recognizedText = speechService.speechToText(voiceBytes, fileName);
             log.info("语音识别结果: text=[{}], isImageGen={}",
                     recognizedText, isImageGenRequest(recognizedText));
+
+            thinkingLog = ThinkingLogBuilder.buildSimple("语音消息",
+                    "🔍 分析意图：语音消息",
+                    "📥 下载语音文件（格式：" + fileName + "）",
+                    "🤖 调用 DashScope ASR API（qwen3-asr-flash）进行语音识别",
+                    "📊 识别结果：\"" + truncate(recognizedText, 50) + "\"");
 
             // 根据识别结果路由：图片生成 或 LLM 对话
             if (isImageGenRequest(recognizedText)) {
@@ -537,6 +580,8 @@ public class WeChatBotService {
                 String llmReply = llmService.chat(fromUser, recognizedText);
                 handleLlmReply(fromUser, llmReply);
             }
+
+            sendReply(fromUser, thinkingLog);
 
         } catch (Exception e) {
             log.error("语音处理失败", e);
@@ -561,9 +606,16 @@ public class WeChatBotService {
     private void handleFileMessage(String fromUser, MessageItem item, FileItem fileItem) {
         try {
             client.sendTextWithTyping(fromUser, "正在查看文件，请稍候...", 500);
+
+            String thinkingLog = ThinkingLogBuilder.buildSimple(fileItem.getFile_name(),
+                    "🔍 分析意图：文件处理请求",
+                    "📥 下载文件：" + fileItem.getFile_name(),
+                    "🤖 调用 Apache PDFBox/POI 提取文本",
+                    "🧠 调用 DeepSeek LLM 生成摘要");
+
             byte[] fileBytes = client.downloadFileFromMessageItem(item);
             String summary = fileSummaryService.summarizeFile(fileBytes, fileItem.getFile_name());
-            sendReply(fromUser, summary);
+            sendReply(fromUser, thinkingLog + "\n\n💬 回复：\n" + summary);
         } catch (Exception e) {
             log.error("文件处理失败", e);
             sendReply(fromUser, "抱歉，文件处理失败，请稍后再试。");
@@ -614,6 +666,11 @@ public class WeChatBotService {
             String voiceName = text.replaceFirst("^(切换音色|设置音色|换成音色|更换音色|音色)", "").trim();
             sendReply(fromUser, speechService.setVoice(fromUser, voiceName));
         }
+    }
+
+    private String truncate(String text, int maxLen) {
+        if (text == null) return "";
+        return text.length() > maxLen ? text.substring(0, maxLen) + "..." : text;
     }
 
     /**

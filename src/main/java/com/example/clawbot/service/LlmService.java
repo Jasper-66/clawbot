@@ -1,9 +1,13 @@
 package com.example.clawbot.service;
 
+import com.example.clawbot.entity.ChatHistory;
+import com.example.clawbot.repository.ChatHistoryRepository;
 import com.example.clawbot.tool.GeocodeTool;
 import com.example.clawbot.tool.NewsTool;
 import com.example.clawbot.tool.PlanRouteTool;
 import com.example.clawbot.tool.SearchNearbyTool;
+import com.example.clawbot.tool.ReminderTool;
+import com.example.clawbot.tool.ScheduledTaskTool;
 import com.example.clawbot.tool.TarotTool;
 import com.example.clawbot.tool.TextToSpeechTool;
 import com.example.clawbot.tool.WeatherTool;
@@ -77,6 +81,15 @@ public class LlmService {
 
     /** 塔罗占卜工具 */
     private final TarotTool tarotTool;
+
+    /** 定时提醒工具 */
+    private final ReminderTool reminderTool;
+
+    /** 周期任务工具 */
+    private final ScheduledTaskTool scheduledTaskTool;
+
+    /** 对话历史仓库 */
+    private final ChatHistoryRepository chatHistoryRepository;
 
     /** JSON 解析器 */
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -159,6 +172,17 @@ public class LlmService {
         // 获取或创建该用户的对话历史列表
         LinkedList<Map<String, Object>> history = conversations.computeIfAbsent(userId, k -> new LinkedList<>());
 
+        // 如果内存中没有历史记录，从数据库加载
+        synchronized (history) {
+            if (history.isEmpty()) {
+                loadChatHistory(userId, history);
+            }
+        }
+
+        // 初始化思考日志
+        ThinkingLogBuilder thinkingLog = new ThinkingLogBuilder(userMessage);
+        thinkingLog.addStep("🤖", "调用 LLM（" + model + "），请求分析中...");
+
         // 组装消息：system prompt → 历史消息 → 当前用户消息
         List<Map<String, Object>> messages = new ArrayList<>();
         messages.add(Map.of("role", "system", "content", SYSTEM_PROMPT));
@@ -181,12 +205,14 @@ public class LlmService {
                 searchNearbyTool.getToolDefinition(),
                 planRouteTool.getToolDefinition(),
                 textToSpeechTool.getToolDefinition(),
-                tarotTool.getToolDefinition()
+                tarotTool.getToolDefinition(),
+                reminderTool.getToolDefinition(),
+                scheduledTaskTool.getToolDefinition()
         ));
         requestBody.put("tool_choice", "auto"); // 让模型自行决定是否调用
 
-        // 进入 Function Calling 闭环
-        String reply = callLlmWithTools(requestBody, messages);
+        // 进入 Function Calling 闭环（传入 thinkingLog）
+        String reply = callLlmWithTools(requestBody, messages, thinkingLog, userId);
 
         // 更新对话历史（线程安全），淘汰旧消息
         synchronized (history) {
@@ -197,7 +223,49 @@ public class LlmService {
             }
         }
 
-        return reply.trim();
+        // 保存到数据库
+        saveChatHistory(userId, userMessage, reply);
+
+        // 构建带思考日志的完整回复
+        return thinkingLog.build(reply.trim());
+    }
+
+    /**
+     * 保存对话历史到数据库
+     */
+    private void saveChatHistory(String userId, String userMessage, String reply) {
+        try {
+            ChatHistory userChat = new ChatHistory();
+            userChat.setUserId(userId);
+            userChat.setRole("user");
+            userChat.setContent(userMessage);
+            chatHistoryRepository.save(userChat);
+
+            ChatHistory assistantChat = new ChatHistory();
+            assistantChat.setUserId(userId);
+            assistantChat.setRole("assistant");
+            assistantChat.setContent(reply);
+            chatHistoryRepository.save(assistantChat);
+        } catch (Exception e) {
+            log.error("保存对话历史失败", e);
+        }
+    }
+
+    /**
+     * 从数据库加载对话历史
+     */
+    private void loadChatHistory(String userId, LinkedList<Map<String, Object>> history) {
+        try {
+            List<ChatHistory> dbHistory = chatHistoryRepository.findTop20ByUserIdOrderByCreatedAtDesc(userId);
+            // 反转顺序（数据库是倒序，需要正序）
+            java.util.Collections.reverse(dbHistory);
+            for (ChatHistory chat : dbHistory) {
+                history.add(Map.of("role", chat.getRole(), "content", chat.getContent()));
+            }
+            log.info("从数据库加载用户 {} 的对话历史 {} 条", userId, dbHistory.size());
+        } catch (Exception e) {
+            log.error("加载对话历史失败", e);
+        }
     }
 
     /**
@@ -232,7 +300,9 @@ public class LlmService {
      * @return 模型最终的文本回复；超轮数或异常时返回兜底提示
      */
     private String callLlmWithTools(Map<String, Object> requestBody,
-                                    List<Map<String, Object>> messages) {
+                                    List<Map<String, Object>> messages,
+                                    ThinkingLogBuilder thinkingLog,
+                                    String userId) {
         try {
             for (int toolRound = 0; toolRound <= MAX_TOOL_ROUNDS; toolRound++) {
                 // 1. 调用 LLM
@@ -242,13 +312,19 @@ public class LlmService {
                 // 2. 无工具调用 → 模型已完成回答
                 if (!toolCalls.isArray() || toolCalls.isEmpty()) {
                     String content = assistant.path("content").asText("").trim();
+                    if (!content.isEmpty()) {
+                        thinkingLog.addStep("💡", "LLM 生成最终回复");
+                    }
                     return content.isEmpty() ? "抱歉，我没有生成有效回复，请稍后再试。" : content;
                 }
 
                 // 3. 达到最大轮数 → 终止循环
                 if (toolRound == MAX_TOOL_ROUNDS) {
+                    thinkingLog.addStep("⚠️", "达到最大工具调用轮数，终止循环");
                     return "抱歉，工具调用次数过多，请换一种方式提问。";
                 }
+
+                thinkingLog.addStep("📋", "LLM 决策：需要调用 " + toolCalls.size() + " 个工具");
 
                 // 4. 将助手的工具调用消息加入消息列表
                 messages.add(toAssistantToolCallMessage(assistant));
@@ -263,8 +339,17 @@ public class LlmService {
                     JsonNode function = toolCall.path("function");
                     String functionName = function.path("name").asText("");
                     String arguments = function.path("arguments").asText("{}");
-                    String toolResult = executeTool(functionName, arguments);
+
+                    // 记录工具调用前的日志
+                    thinkingLog.addStep("🔧", "执行工具：" + functionName);
+
+                    String toolResult = executeTool(functionName, arguments, userId);
                     log.info("执行工具: name={}, id={}", functionName, toolCallId);
+
+                    // 记录工具调用结果
+                    String techInfo = getToolTechInfo(functionName);
+                    String resultSummary = truncateForLog(toolResult, 100);
+                    thinkingLog.addToolCall(functionName, arguments, techInfo, resultSummary);
 
                     messages.add(Map.of(
                             "role", "tool",
@@ -276,6 +361,7 @@ public class LlmService {
             return "抱歉，我暂时无法处理，请稍后再试。";
         } catch (Exception e) {
             log.error("Function Calling 调用失败", e);
+            thinkingLog.addStep("❌", "调用异常：" + e.getMessage());
             return "抱歉，我暂时无法处理，请稍后再试。";
         }
     }
@@ -294,7 +380,7 @@ public class LlmService {
      * @param arguments    工具参数 JSON 字符串（如 {@code {"city":"北京"}}）
      * @return 工具执行结果字符串，找不到工具时返回错误说明
      */
-    private String executeTool(String functionName, String arguments) {
+    private String executeTool(String functionName, String arguments, String userId) {
         if (weatherTool.getToolName().equals(functionName)) {
             return weatherTool.execute(functionName, arguments);
         }
@@ -316,7 +402,34 @@ public class LlmService {
         if (tarotTool.getToolName().equals(functionName)) {
             return tarotTool.execute(functionName, arguments);
         }
+        if (reminderTool.getToolName().equals(functionName)) {
+            return reminderTool.execute(functionName, arguments, userId);
+        }
+        if (scheduledTaskTool.getToolName().equals(functionName)) {
+            return scheduledTaskTool.execute(functionName, arguments, userId);
+        }
         return "工具调用失败：未找到工具 " + functionName;
+    }
+
+    /**
+     * 获取工具的技术说明（用于思考日志）
+     */
+    private String getToolTechInfo(String functionName) {
+        if (weatherTool.getToolName().equals(functionName)) return "调用心知天气 API";
+        if (newsTool.getToolName().equals(functionName)) return "调用 60s.viki.moe 新闻 API";
+        if (geocodeTool.getToolName().equals(functionName)) return "调用高德地图地理编码 API";
+        if (searchNearbyTool.getToolName().equals(functionName)) return "调用高德地图周边搜索 API";
+        if (planRouteTool.getToolName().equals(functionName)) return "调用高德地图路线规划 API";
+        if (textToSpeechTool.getToolName().equals(functionName)) return "调用 DashScope TTS API（qwen3-tts-flash）";
+        if (tarotTool.getToolName().equals(functionName)) return "塔罗占卜算法";
+        if (reminderTool.getToolName().equals(functionName)) return "创建 ScheduledExecutorService 延迟任务";
+        if (scheduledTaskTool.getToolName().equals(functionName)) return "创建 ScheduledExecutorService 周期任务";
+        return "未知工具";
+    }
+
+    private String truncateForLog(String text, int maxLen) {
+        if (text == null) return "";
+        return text.length() > maxLen ? text.substring(0, maxLen) + "..." : text;
     }
 
     /**
