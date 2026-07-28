@@ -11,8 +11,8 @@ import java.util.List;
 import java.util.Map;
 
 // 消息数据访问层，管理 messages 表的读写和历史查询
-@Repository
-@RequiredArgsConstructor
+@Repository               //   告诉Spring 这是一个数据库访问组件
+@RequiredArgsConstructor   //自定生成构造函数，注入Final字段
 public class MessageRepository {
 
     private final JdbcTemplate jdbcTemplate;
@@ -32,12 +32,12 @@ public class MessageRepository {
                 FOREIGN KEY (conversation_id) REFERENCES conversations(id)
             )
             """);
-
+        // 索引：按会话ID查询（最常用）
         jdbcTemplate.execute("""
             CREATE INDEX IF NOT EXISTS idx_messages_conversation_id
                 ON messages(conversation_id)
             """);
-
+        // 索引：按时间排序（取最近N条时用）
         jdbcTemplate.execute("""
             CREATE INDEX IF NOT EXISTS idx_messages_created_at
                 ON messages(created_at)
