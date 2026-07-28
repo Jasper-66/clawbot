@@ -15,7 +15,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
-/** LLM Function Calling 工具，调用高德地理编码 API 将地名/地址转为经纬度坐标。 */
+// 地址解析工具：LLM 可调用将中文地址转换为经纬度坐标（高德地图 API）
 @Slf4j
 @Component
 @RequiredArgsConstructor
@@ -30,21 +30,23 @@ public class GeocodeTool {
     private static final int MAX_PLACE_LENGTH = 100;
     private static final String GEOCODE_URL = "https://restapi.amap.com/v3/geocode/geo";
 
-    @Tool(name = "geocode", description = "根据地名查询经纬度坐标。返回坐标信息，不直接展示给用户")
-    public String geocode(@ToolParam(description = "地名、地址或城市名称，例如：北京、上海、杭州西湖、天安门") String place) {
-        if (place == null || place.isBlank()) {
-            return "{\"error\":\"place 参数不能为空\"}";
+    @Tool(name = "geocode", description = "根据地名查询经纬度坐标。当用户提到某个地点、地址或城市，且后续需要基于经纬度调用其他工具（如天气、地图等）时使用此工具。返回坐标信息，不直接展示给用户。")
+    public String geocode(
+            @ToolParam(description = "地名、地址或城市名称，例如：北京、上海、杭州西湖、天安门、东京、纽约等") String place) {
+        if (place == null || place.trim().isEmpty()) {
+            return "工具调用失败：place 参数不能为空";
         }
-        if (place.length() > MAX_PLACE_LENGTH) {
-            return "{\"error\":\"place 参数过长\"}";
+        String trimmedPlace = place.trim();
+        if (trimmedPlace.length() > MAX_PLACE_LENGTH) {
+            return "工具调用失败：place 参数过长";
         }
+
+        log.info("[行动] LLM调用工具: geocode(place=\"{}\") → 调用高德地图API将地址转为经纬度坐标", trimmedPlace);
 
         try {
-            log.info("执行地址解析工具: place={}", place);
-
             URI uri = UriComponentsBuilder.fromUriString(GEOCODE_URL)
                     .queryParam("key", amapApiKey)
-                    .queryParam("address", place)
+                    .queryParam("address", trimmedPlace)
                     .encode(StandardCharsets.UTF_8)
                     .build()
                     .toUri();
@@ -55,16 +57,16 @@ public class GeocodeTool {
             String status = root.path("status").asText("0");
             if (!"1".equals(status)) {
                 String info = root.path("info").asText("未知错误");
-                return "{\"error\":\"地址解析失败：" + info + "\"}";
+                return String.format("{\"error\":\"地址解析失败：%s\"}", info);
             }
 
             JsonNode geocodes = root.path("geocodes");
             if (!geocodes.isArray() || geocodes.isEmpty()) {
-                return "{\"error\":\"未找到地点：" + place + "\"}";
+                return String.format("{\"error\":\"未找到地点：%s\"}", trimmedPlace);
             }
-
             JsonNode result = geocodes.get(0);
-            String formattedAddress = result.path("formatted_address").asText(place);
+
+            String formattedAddress = result.path("formatted_address").asText(trimmedPlace);
             String location = result.path("location").asText("");
             String country = result.path("country").asText("");
             String province = result.path("province").asText("");
@@ -73,11 +75,14 @@ public class GeocodeTool {
 
             String[] parts = location.split(",");
             if (parts.length != 2) {
-                return "{\"error\":\"坐标格式异常：" + location + "\"}";
+                return String.format("{\"error\":\"坐标格式异常：%s\"}", location);
             }
             double longitude = Double.parseDouble(parts[0]);
             double latitude = Double.parseDouble(parts[1]);
 
+            log.info("[观察] 工具返回: geocode → \"{}\" → 坐标({}, {}), {}{}{}",
+                    trimmedPlace, longitude, latitude,
+                    country, province, city, district);
             return objectMapper.writeValueAsString(Map.of(
                     "name", formattedAddress,
                     "location", location,
@@ -89,8 +94,9 @@ public class GeocodeTool {
                     "district", district
             ));
         } catch (Exception e) {
-            log.error("地址解析工具执行失败: {}", e.getMessage());
-            return "{\"error\":\"地址解析异常\"}";
+            log.error("[异常] 工具调用失败 geocode(place=\"{}\") | 原因: {} | 建议: 检查高德地图 API 密钥",
+                    trimmedPlace, e.getMessage(), e);
+            return "工具调用失败：地址解析异常: " + e.getMessage();
         }
     }
 }

@@ -17,15 +17,16 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
-/** TTS（文字转语音）和 ASR（语音转文字）服务，通过阿里云 DashScope API 实现，支持 15 种音色切换和微信音频格式转码。 */
+// 语音服务：TTS 文字转语音、ASR 语音识别、SILK 解码、多音色管理
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class SpeechService {
 
     private final RestTemplate restTemplate;
-    private final ConversationMemoryService memoryService;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Value("${vision.api.key}")
@@ -43,7 +44,8 @@ public class SpeechService {
     @Value("${speech.asr.model:qwen3-asr-flash}")
     private String asrModel;
 
-    /** 预定义音色表，key=英文参数名, value=[中文名, 描述] */
+    private final ConcurrentHashMap<String, String> userVoices = new ConcurrentHashMap<>();
+
     private static final LinkedHashMap<String, String[]> VOICE_INFO = new LinkedHashMap<>();
     static {
         VOICE_INFO.put("Cherry",    new String[]{"芊悦", "阳光积极、亲切自然小姐姐"});
@@ -63,54 +65,17 @@ public class SpeechService {
         VOICE_INFO.put("Rocky",     new String[]{"粤语-阿强", "幽默风趣的粤语男声"});
     }
 
-    /** 音色标签映射，用于模糊描述匹配 */
-    private static final LinkedHashMap<String, java.util.Set<String>> VOICE_TAGS =
-            new LinkedHashMap<>();
-    static {
-        VOICE_TAGS.put("Cherry",    java.util.Set.of("阳光", "积极", "亲切", "自然", "小姐姐"));
-        VOICE_TAGS.put("Ethan",     java.util.Set.of("标准", "普通话", "阳光", "温暖"));
-        VOICE_TAGS.put("Serena",    java.util.Set.of("温柔", "小姐姐", "甜"));
-        VOICE_TAGS.put("Chelsie",   java.util.Set.of("二次元", "虚拟", "女友"));
-        VOICE_TAGS.put("Momo",      java.util.Set.of("撒娇", "搞怪", "逗"));
-        VOICE_TAGS.put("Vivian",    java.util.Set.of("拽", "暴躁"));
-        VOICE_TAGS.put("Bella",     java.util.Set.of("萝莉", "萌"));
-        VOICE_TAGS.put("Mia",       java.util.Set.of("温顺", "乖巧", "温柔"));
-        VOICE_TAGS.put("Nofish",    java.util.Set.of("设计师"));
-        VOICE_TAGS.put("Kai",       java.util.Set.of("SPA", "耳朵", "温柔"));
-        VOICE_TAGS.put("Neil",      java.util.Set.of("新闻", "专业", "主持人", "咬字"));
-        VOICE_TAGS.put("Eldric Sage", java.util.Set.of("沉稳", "睿智", "老者", "成熟"));
-        VOICE_TAGS.put("Vincent",   java.util.Set.of("沙哑", "烟嗓", "江湖", "豪情", "大叔"));
-        VOICE_TAGS.put("Sunny",     java.util.Set.of("四川", "川妹子", "甜"));
-        VOICE_TAGS.put("Rocky",     java.util.Set.of("粤语", "广东话", "幽默", "风趣"));
-    }
-
-    /** 男性音色集合 */
-    private static final java.util.Set<String> MALE_VOICES =
-            java.util.Set.of("Ethan", "Nofish", "Kai", "Neil", "Eldric Sage", "Vincent", "Rocky");
-
-    /** 女性音色集合 */
-    private static final java.util.Set<String> FEMALE_VOICES =
-            java.util.Set.of("Cherry", "Serena", "Chelsie", "Momo", "Vivian", "Bella", "Mia", "Sunny");
-
-    /** 性别关键词 — 用于模糊匹配时自动附加到对应音色 */
-    private static final java.util.Set<String> MALE_KEYWORDS =
-            java.util.Set.of("男声", "男生", "男性", "男", "男孩", "小哥哥", "哥哥");
-    private static final java.util.Set<String> FEMALE_KEYWORDS =
-            java.util.Set.of("女声", "女生", "女性", "女", "女孩", "小姐姐", "妹妹");
-
-    /** SILK 解码器路径，用于将微信 SILK 格式转为 PCM */
     @Value("${silk.decoder.path}")
     private String silkDecoderPath;
 
     private static final String DASHSCOPE_BASE = "https://dashscope.aliyuncs.com";
+
     private static final String TTS_ENDPOINT = "/api/v1/services/aigc/multimodal-generation/generation";
 
-    /** TTS 文字转语音，调用 DashScope 多模态生成 API 合成 WAV 音频。 */
     public byte[] textToSpeech(String userId, String text) {
         try {
-            // 确定使用的音色（优先从 Redis 长期记忆中读取用户偏好）
-            String voicePref = memoryService.getVoicePreference(userId);
-            String voice = voicePref != null ? voicePref : ttsVoice;
+            // 确定使用的音色
+            String voice = userVoices.getOrDefault(userId, ttsVoice);
 
             // 构建 TTS 请求体
             Map<String, Object> input = Map.of(
@@ -175,7 +140,6 @@ public class SpeechService {
         }
     }
 
-    /** ASR 语音转文字，将音频 Base64 编码后通过 DashScope ASR 模型识别为文本。 */
     public String speechToText(byte[] audioBytes, String fileName) {
         try {
             // 非标准格式先转为 WAV（微信常用 SILK/AMR），否则 ASR 无法识别
@@ -230,7 +194,6 @@ public class SpeechService {
         }
     }
 
-    /** 将非标准音频格式（SILK/AMR）通过 silk_v3_decoder 解码并添加 WAV 文件头转为标准 WAV。 */
     private byte[] convertToWavIfNeeded(byte[] audioBytes, String fileName) {
         String lower = fileName != null ? fileName.toLowerCase() : "";
 
@@ -280,7 +243,6 @@ public class SpeechService {
         }
     }
 
-    /** 为 PCM 裸数据添加 44 字节标准 RIFF/WAVE 文件头（单声道、16bit、小端序）。 */
     private byte[] addWavHeader(byte[] pcm, int sampleRate) {
         int dataSize = pcm.length;
         byte[] wav = new byte[44 + dataSize];
@@ -292,7 +254,7 @@ public class SpeechService {
 
         // ── fmt sub-chunk ──
         wav[12] = 'f'; wav[13] = 'm'; wav[14] = 't'; wav[15] = ' ';
-        intLE(wav, 16, 16);        // fmt 块大小 (PCM = 16)
+        intLE(wav, 16, 16);             // fmt 块大小 (PCM = 16)
         shortLE(wav, 20, (short) 1);    // 音频格式 (1 = PCM)
         shortLE(wav, 22, (short) 1);    // 声道数 (1 = Mono)
         intLE(wav, 24, sampleRate);     // 采样率
@@ -309,7 +271,6 @@ public class SpeechService {
         return wav;
     }
 
-    /** 小端序写入 32 位整数到字节数组。 */
     private static void intLE(byte[] buf, int offset, int value) {
         buf[offset] = (byte) value;
         buf[offset + 1] = (byte) (value >> 8);
@@ -317,13 +278,11 @@ public class SpeechService {
         buf[offset + 3] = (byte) (value >> 24);
     }
 
-    /** 小端序写入 16 位短整数到字节数组。 */
     private static void shortLE(byte[] buf, int offset, short value) {
         buf[offset] = (byte) value;
         buf[offset + 1] = (byte) (value >> 8);
     }
 
-    /** 通过 HTTP GET 下载文件到字节数组，使用 URI 对象避免预签名 URL 的二次编码问题。 */
     private byte[] downloadFromUrl(String url) {
         try {
             log.info("开始下载: url={}", url);
@@ -342,24 +301,25 @@ public class SpeechService {
         }
     }
 
-    /** 设置用户 TTS 音色偏好，支持中英文名模糊匹配。 */
     public String setVoice(String userId, String voiceName) {
+        log.info("[行动] 音色管理: 用户 {} 请求切换音色 → \"{}\"", userId, voiceName);
         if (voiceName == null || voiceName.isBlank()) {
-            return "请描述你想要的音色，例如「切换音色Cherry」、「换个温柔的女生声音」或「有没有沉稳的男声」。";
+            log.info("[观察] 未指定音色，返回列表");
+            return getAvailableVoices();
         }
         String voice = findVoice(voiceName.trim());
         if (voice == null) {
-            return "未能匹配到适合「" + voiceName.trim() + "」的音色，发送「音色列表」查看所有音色及描述。";
+            log.warn("[观察] 音色未匹配: userId={}, voiceName={}", userId, voiceName.trim());
+            return "未找到音色「" + voiceName.trim() + "」。\n\n" + getAvailableVoices();
         }
-        memoryService.setVoicePreference(userId, voice);
+        userVoices.put(userId, voice);
         String[] info = VOICE_INFO.get(voice);
+        log.info("[观察] 音色切换成功: userId={}, voice={} ({}·{})", userId, voice, info[0], info[1]);
         return "已切换音色为 " + voice + "（" + info[0] + "·" + info[1] + "）";
     }
 
-    /** 获取用户当前 TTS 音色显示名称。 */
     public String getCurrentVoice(String userId) {
-        String voicePref = memoryService.getVoicePreference(userId);
-        String voice = voicePref != null ? voicePref : ttsVoice;
+        String voice = userVoices.getOrDefault(userId, ttsVoice);
         String[] info = VOICE_INFO.get(voice);
         if (info != null) {
             return voice + "（" + info[0] + "·" + info[1] + "）";
@@ -367,7 +327,6 @@ public class SpeechService {
         return voice + "（系统默认）";
     }
 
-    /** 获取所有可用音色的格式化列表文本。 */
     public String getAvailableVoices() {
         StringBuilder sb = new StringBuilder("可用音色列表：\n");
         int i = 1;
@@ -376,13 +335,12 @@ public class SpeechService {
                     .append("（").append(entry.getValue()[0]).append("）")
                     .append(" — ").append(entry.getValue()[1]).append("\n");
         }
-        sb.append("\n发送「切换音色 + 名称」或直接描述想要的音色即可切换，例如「换个温柔的女生声音」。");
+        sb.append("\n发送「切换音色 + 英文名或中文名」即可切换，例如「切换音色Ethan」。");
         return sb.toString();
     }
 
-    /** 根据用户输入模糊匹配音色参数名，依次尝试精确匹配→包含匹配→标签打分。 */
     private String findVoice(String input) {
-        // 第一轮：精确匹配（忽略大小写的英文名、精确中文名）
+        // 第一轮：精确匹配（忽略大小写）
         for (Map.Entry<String, String[]> entry : VOICE_INFO.entrySet()) {
             if (entry.getKey().equalsIgnoreCase(input)) return entry.getKey();
             if (entry.getValue()[0].equals(input)) return entry.getKey();
@@ -392,34 +350,9 @@ public class SpeechService {
             if (entry.getKey().toLowerCase().contains(input.toLowerCase())) return entry.getKey();
             if (entry.getValue()[0].contains(input)) return entry.getKey();
         }
-        // 第三轮：标签关键词打分（支持描述性输入如「温柔的女生声音」）
-        String lowerInput = input.toLowerCase();
-        String bestVoice = null;
-        int bestScore = 0;
-        for (Map.Entry<String, java.util.Set<String>> tagEntry : VOICE_TAGS.entrySet()) {
-            String voiceName = tagEntry.getKey();
-            int score = 0;
-            for (String tag : tagEntry.getValue()) {
-                if (lowerInput.contains(tag)) score++;
-            }
-            // 性别标签加分
-            boolean isMale = MALE_VOICES.contains(voiceName);
-            boolean isFemale = FEMALE_VOICES.contains(voiceName);
-            for (String kw : MALE_KEYWORDS) {
-                if (lowerInput.contains(kw) && isMale) score++;
-            }
-            for (String kw : FEMALE_KEYWORDS) {
-                if (lowerInput.contains(kw) && isFemale) score++;
-            }
-            if (score > bestScore) {
-                bestScore = score;
-                bestVoice = voiceName;
-            }
-        }
-        return bestScore > 0 ? bestVoice : null;
+        return null;
     }
 
-    /** 根据文件扩展名推断音频 MIME 类型。 */
     private String getMimeType(String fileName) {
         if (fileName == null) return "audio/wav";
         String lower = fileName.toLowerCase();

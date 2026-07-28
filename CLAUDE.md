@@ -27,7 +27,7 @@ mvn spring-boot:run
 
 ## Architecture
 
-ClawBot is a WeChat bot that integrates LLM chat, image recognition, TTS/ASR, image generation, weather queries, and file summarization. The entry point is `MissionApplication.java` in package `com.example.clawbot`.
+ClawBot is a WeChat bot that integrates LLM chat, image recognition, TTS/ASR, image generation, weather queries, and file summarization. The entry point is `ClawBotApplication.java` in package `com.example.clawbot`.
 
 ### Message flow
 

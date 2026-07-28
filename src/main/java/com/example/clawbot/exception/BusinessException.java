@@ -1,6 +1,6 @@
 package com.example.clawbot.exception;
 
-/** 业务异常类，携带错误码和可读消息，由 GlobalExceptionHandler 统一捕获处理。 */
+// 业务异常类，携带错误码和中文消息，由全局异常处理器统一拦截
 public class BusinessException extends RuntimeException {
 
     private Integer code;

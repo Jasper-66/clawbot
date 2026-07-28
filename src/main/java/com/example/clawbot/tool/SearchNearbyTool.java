@@ -18,7 +18,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/** LLM Function Calling 工具，调用高德周边搜索 API 查询指定位置附近的 POI。 */
+// 周边搜索工具：LLM 可调用搜索指定位置附近的 POI 兴趣点（高德地图 API）
 @Slf4j
 @Component
 @RequiredArgsConstructor
@@ -30,50 +30,50 @@ public class SearchNearbyTool {
     @Value("${amap.api.key}")
     private String amapApiKey;
 
-    private static final String AMAP_PLACE_AROUND_URL = "https://restapi.amap.com/v3/place/around";
     private static final int DEFAULT_RADIUS = 3000;
     private static final int MAX_RADIUS = 50000;
     private static final int MAX_RESULTS = 10;
+    private static final String AMAP_PLACE_AROUND_URL = "https://restapi.amap.com/v3/place/around";
 
-    @Tool(name = "search_nearby", description = "搜索指定位置周边的POI（兴趣点），如餐厅、商店、景点等。若用户只提供地址名称，应先调用geocode工具获取坐标")
+    @Tool(name = "search_nearby", description = "搜索指定位置周边的 POI（兴趣点），如餐厅、商店、景点等。location 参数必须为 经度,纬度 格式，若用户提供的是地址名称，应先调用 geocode 工具获取坐标。")
     public String searchNearby(
-            @ToolParam(description = "中心点经纬度，格式 经度,纬度（如 116.473168,39.993015）") String location,
+            @ToolParam(description = "中心点经纬度，格式 经度,纬度（如 116.473168,39.993015）。若用户只提供地址，应先调用 geocode 工具转换为此格式。") String location,
             @ToolParam(required = false, description = "搜索关键词，如 火锅、咖啡、游乐园") String keywords,
-            @ToolParam(required = false, description = "POI类型编码，多个用英文逗号分隔") String types,
-            @ToolParam(required = false, description = "搜索半径米，最大50000，默认3000") Integer radius,
-            @ToolParam(required = false, description = "排序规则，distance=按距离排序，weight=综合排序") String sortrule) {
-        if (location == null || location.isBlank()) {
-            return "{\"error\":\"location 参数不能为空\"}";
+            @ToolParam(required = false, description = "POI 类型编码，多个用英文逗号 , 分隔，如 050301,050302") String types,
+            @ToolParam(required = false, description = "搜索半径，单位米，最大 50000，默认 3000") Integer radius,
+            @ToolParam(required = false, description = "排序规则：distance=按距离排序（默认），weight=综合排序") String sortrule) {
+
+        if (location == null || location.trim().isEmpty()) {
+            return "工具调用失败：location 参数不能为空";
         }
-        if (!location.matches("^-?\\d+\\.\\d+,-?\\d+\\.\\d+$")) {
-            return "{\"error\":\"location 格式不正确，应为 经度,纬度（如 116.473168,39.993015）\"}";
+        String trimmedLocation = location.trim();
+        if (!trimmedLocation.matches("^-?\\d+\\.\\d+,-?\\d+\\.\\d+$")) {
+            return "工具调用失败：location 格式不正确，应为 经度,纬度（如 116.473168,39.993015）";
         }
 
-        int r = DEFAULT_RADIUS;
+        int effectiveRadius = DEFAULT_RADIUS;
         if (radius != null) {
-            r = Math.max(1, Math.min(radius, MAX_RADIUS));
+            effectiveRadius = radius;
+            if (effectiveRadius < 1) effectiveRadius = 1;
+            if (effectiveRadius > MAX_RADIUS) effectiveRadius = MAX_RADIUS;
         }
 
-        String sr = (sortrule != null && !sortrule.isBlank()) ? sortrule : "distance";
-        if (!"distance".equals(sr) && !"weight".equals(sr)) {
-            sr = "distance";
-        }
+        String effectiveSortrule = (sortrule != null && sortrule.trim().equals("weight")) ? "weight" : "distance";
+        String effectiveKeywords = keywords != null ? keywords.trim() : "";
+        String effectiveTypes = types != null ? types.trim() : "";
 
-        String kw = (keywords != null) ? keywords.trim() : "";
-        String tp = (types != null) ? types.trim() : "";
-
-        log.info("执行周边搜索: location={}, keywords={}, types={}, radius={}, sortrule={}",
-                location, kw, tp, r, sr);
+        log.info("[行动] LLM调用工具: search_nearby(location=\"{}\", keywords=\"{}\", radius={}) → 搜索周边POI",
+                trimmedLocation, effectiveKeywords, effectiveRadius);
 
         try {
-            URI uri = buildUri(location, kw, tp, r, sr);
+            URI uri = buildUri(trimmedLocation, effectiveKeywords, effectiveTypes, effectiveRadius, effectiveSortrule);
             String response = restTemplate.getForObject(uri, String.class);
             JsonNode root = objectMapper.readTree(response);
 
             String status = root.path("status").asText("0");
             if (!"1".equals(status)) {
                 String info = root.path("info").asText("未知错误");
-                return "{\"error\":\"搜索失败：" + info + "\"}";
+                return String.format("{\"error\":\"搜索失败：%s\"}", info);
             }
 
             JsonNode pois = root.path("pois");
@@ -95,13 +95,15 @@ public class SearchNearbyTool {
                 results.add(item);
             }
 
+            log.info("[观察] 工具返回: search_nearby → 找到 {} 个周边地点", results.size());
             return objectMapper.writeValueAsString(Map.of(
                     "count", results.size(),
                     "results", results
             ));
         } catch (Exception e) {
-            log.error("周边搜索工具执行失败: {}", e.getMessage());
-            return "{\"error\":\"周边搜索请求异常\"}";
+            log.error("[异常] 工具调用失败 search_nearby(location=\"{}\") | 原因: {} | 建议: 检查高德地图 API 密钥",
+                    trimmedLocation, effectiveKeywords, e.getMessage(), e);
+            return "工具调用失败：周边搜索异常: " + e.getMessage();
         }
     }
 

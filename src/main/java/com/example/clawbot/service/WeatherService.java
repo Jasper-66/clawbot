@@ -9,19 +9,19 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
-/** 调用心知天气 API 查询指定城市的实时天气信息。 */
 @Slf4j
+// 天气查询服务，调用心知天气 API 获取城市实时天气
 @Service
 @RequiredArgsConstructor
 public class WeatherService {
 
     private final RestTemplate restTemplate;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Value("${weather.api.key:}")
     private String weatherApiKey;
 
-    /** 查询指定城市的实时天气，返回格式化的天气信息文本。 */
     public String getWeather(String city) {
         // 前置检查：API Key 未配置时返回友好提示
         if (weatherApiKey == null || weatherApiKey.trim().isEmpty()) {

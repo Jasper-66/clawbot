@@ -16,13 +16,14 @@ import org.springframework.web.client.RestTemplate;
 import java.util.Base64;
 import java.util.Map;
 
-/** 图片生成服务，调用智谱 CogView-3-Plus API 根据文本描述生成图片。 */
 @Slf4j
+// AI 图片生成服务，调用智谱 CogView-3-Plus API 根据文本描述生成图片
 @Service
 @RequiredArgsConstructor
 public class ImageGenerationService {
 
     private final RestTemplate restTemplate;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Value("${image.gen.api.key}")
@@ -37,7 +38,6 @@ public class ImageGenerationService {
     @Value("${image.gen.api.endpoint}")
     private String endpoint;
 
-    /** 根据文本描述生成图片，兼容 OpenAI 和 DashScope 响应格式。 */
     public byte[] generateImage(String prompt) {
         try {
             // --- 1. 构建 HTTP 请求头 ---
@@ -137,7 +137,6 @@ public class ImageGenerationService {
         }
     }
 
-    /** 从 URL 下载图片到内存字节数组。 */
     private byte[] downloadFromUrl(String imageUrl) {
         try {
             log.info("开始下载图片: url={}", imageUrl);

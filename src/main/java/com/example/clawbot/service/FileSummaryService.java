@@ -1,5 +1,7 @@
 package com.example.clawbot.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pdfbox.Loader;
@@ -9,47 +11,62 @@ import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.poi.xslf.usermodel.XMLSlideShow;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
-import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.messages.SystemMessage;
-import org.springframework.ai.chat.messages.UserMessage;
-import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.chat.prompt.Prompt;
-import org.springframework.ai.openai.OpenAiChatModel;
-import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
 
 import java.io.ByteArrayInputStream;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
-/** 文件总结服务，使用 Apache PDFBox/POI 提取文档文本并通过 Spring AI ChatModel 生成摘要。 */
+// 文件内容提取与 LLM 摘要服务，支持 PDF/DOCX/XLSX/PPTX/TXT 等格式
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class FileSummaryService {
 
-    private final OpenAiChatModel deepSeekChatModel;
+    private final RestTemplate restTemplate;
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Value("${deepseek.api.key}")
+    private String apiKey;
+
+    @Value("${deepseek.api.base-url}")
+    private String baseUrl;
 
     @Value("${deepseek.api.model}")
     private String model;
 
     private static final int MAX_TEXT_LENGTH = 4000;
 
-    /** 总结文件内容：根据扩展名自动选择提取引擎 → 截断超长文本 → LLM 摘要。 */
     public String summarizeFile(byte[] fileBytes, String fileName) {
+        log.info("[行动] 开始文件总结: {} ({} bytes) → 提取文本 → DeepSeek生成摘要", fileName, fileBytes.length);
+
         String text = extractText(fileBytes, fileName);
         if (text == null || text.isBlank()) {
+            log.warn("[观察] 文件总结: 提取文本失败: fileName={}, 可能原因: 文件格式不支持或文件为空", fileName);
             return "未能从文件中提取到文本内容，可能是不支持的格式或文件为空。";
         }
 
+        log.info("[观察] 文本提取完成: fileName={}, textLength={} chars", fileName, text.length());
+
         if (text.length() > MAX_TEXT_LENGTH) {
+            log.info("[观察] 文本过长已截断: original={}, truncated={}", text.length(), MAX_TEXT_LENGTH);
             text = text.substring(0, MAX_TEXT_LENGTH) + "\n...（内容过长已截断）";
         }
 
-        return callLlm(text, fileName);
+        String summary = callLlm(text, fileName);
+        log.info("[观察] 文件总结完成: fileName={}, summaryLength={} chars",
+                fileName, summary != null ? summary.length() : 0);
+        return summary;
     }
 
-    /** 根据文件扩展名路由到对应的文本提取方法。 */
     private String extractText(byte[] fileBytes, String fileName) {
         String lower = fileName != null ? fileName.toLowerCase() : "";
 
@@ -73,7 +90,6 @@ public class FileSummaryService {
         }
     }
 
-    /** 提取纯文本内容，依次尝试 UTF-8 → GBK → 平台默认编码。 */
     private String extractPlainText(byte[] bytes) {
         try {
             return new String(bytes, "UTF-8");
@@ -86,7 +102,6 @@ public class FileSummaryService {
         }
     }
 
-    /** 使用 Apache PDFBox 从 PDF 提取文本。 */
     private String extractPdfText(byte[] bytes) throws Exception {
         try (PDDocument document = Loader.loadPDF(new RandomAccessReadBuffer(bytes))) {
             PDFTextStripper stripper = new PDFTextStripper();
@@ -96,7 +111,6 @@ public class FileSummaryService {
         }
     }
 
-    /** 使用 Apache POI 从 Word 文档提取段落文本。 */
     private String extractDocxText(byte[] bytes) throws Exception {
         try (XWPFDocument doc = new XWPFDocument(new ByteArrayInputStream(bytes))) {
             StringBuilder sb = new StringBuilder();
@@ -110,7 +124,6 @@ public class FileSummaryService {
         }
     }
 
-    /** 使用 Apache POI 从 Excel 工作簿提取所有单元格内容。 */
     private String extractXlsxText(byte[] bytes) throws Exception {
         try (XSSFWorkbook wb = new XSSFWorkbook(new ByteArrayInputStream(bytes))) {
             StringBuilder sb = new StringBuilder();
@@ -134,7 +147,6 @@ public class FileSummaryService {
         }
     }
 
-    /** 按单元格类型（STRING/NUMERIC/BOOLEAN/FORMULA）安全转为字符串。 */
     private String getCellString(org.apache.poi.ss.usermodel.Cell cell) {
         return switch (cell.getCellType()) {
             case STRING -> cell.getStringCellValue();
@@ -152,7 +164,6 @@ public class FileSummaryService {
         };
     }
 
-    /** 使用 Apache POI 从 PowerPoint 提取幻灯片文本。 */
     private String extractPptxText(byte[] bytes) throws Exception {
         try (XMLSlideShow ppt = new XMLSlideShow(new ByteArrayInputStream(bytes))) {
             StringBuilder sb = new StringBuilder();
@@ -171,30 +182,52 @@ public class FileSummaryService {
         }
     }
 
-    /** 调用 ChatModel 生成 200 字以内的中文文档摘要。 */
     private String callLlm(String content, String fileName) {
+        log.info("[行动] 调用 DeepSeek 生成摘要: fileName={}, textLength={}", fileName, content.length());
         try {
-            List<Message> messages = List.of(
-                    new SystemMessage("你是一个专业的文档分析助手。请根据用户提供的文件内容进行简洁总结，控制在200字以内，用中文回复。"),
-                    new UserMessage("请总结以下文件「" + fileName + "」的内容：\n\n" + content)
+            List<Map<String, Object>> messages = List.of(
+                    Map.of("role", "system", "content",
+                            "你是一个专业的文档分析助手。请根据用户提供的文件内容进行简洁总结，控制在200字以内，用中文回复。"),
+                    Map.of("role", "user", "content",
+                            "请总结以下文件「" + fileName + "」的内容：\n\n" + content)
             );
 
-            Prompt prompt = new Prompt(messages, OpenAiChatOptions.builder()
-                    .model(model)
-                    .temperature(0.3)
-                    .maxTokens(512)
-                    .build());
+            Map<String, Object> requestBody = new HashMap<>(Map.of(
+                    "model", model,
+                    "messages", messages,
+                    "temperature", 0.3,
+                    "max_tokens", 512
+            ));
 
-            ChatResponse response = deepSeekChatModel.call(prompt);
-            String reply = response.getResult().getOutput().getText();
-            return (reply != null && !reply.isBlank()) ? reply.trim() : "未能生成总结。";
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.setBearerAuth(apiKey);
+
+            String requestJson = objectMapper.writeValueAsString(requestBody);
+            HttpEntity<String> entity = new HttpEntity<>(requestJson, headers);
+            ResponseEntity<String> response = restTemplate.postForEntity(
+                    baseUrl + "/v1/chat/completions", entity, String.class);
+
+            String responseBody = response.getBody();
+            if (responseBody == null) {
+                return "抱歉，AI 服务返回为空，请稍后再试。";
+            }
+
+            JsonNode root = objectMapper.readTree(responseBody);
+            if (root.has("error")) {
+                log.error("DeepSeek API 错误: {}", root.get("error"));
+                return "抱歉，文档分析服务暂时不可用。";
+            }
+
+            String reply = root.get("choices").get(0).get("message").get("content").asText();
+            return reply != null ? reply.trim() : "未能生成总结。";
+
         } catch (Exception e) {
             log.error("文件总结 LLM 调用失败", e);
             return "抱歉，文档分析失败，请稍后再试。";
         }
     }
 
-    /** 从文件名提取小写扩展名。 */
     private String getExtension(String fileName) {
         if (fileName == null) return "未知";
         int dot = fileName.lastIndexOf('.');

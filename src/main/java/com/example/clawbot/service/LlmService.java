@@ -1,340 +1,243 @@
 package com.example.clawbot.service;
 
+import com.example.clawbot.repository.ConversationRepository;
+import com.example.clawbot.repository.MessageRepository;
+import com.example.clawbot.repository.SqliteChatMemory;
+import com.example.clawbot.tool.GeocodeTool;
+import com.example.clawbot.tool.PlanRouteTool;
+import com.example.clawbot.tool.ReminderTool;
+import com.example.clawbot.tool.SearchNearbyTool;
+import com.example.clawbot.tool.TarotTool;
+import com.example.clawbot.tool.TextToSpeechTool;
+import com.example.clawbot.tool.WeatherTool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.chat.messages.AssistantMessage;
-import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.messages.SystemMessage;
-import org.springframework.ai.chat.messages.ToolResponseMessage;
-import org.springframework.ai.chat.messages.UserMessage;
-import org.springframework.ai.chat.messages.AssistantMessage.ToolCall;
-import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.advisor.AbstractChatMemoryAdvisor;
+import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.prompt.Prompt;
-import org.springframework.ai.model.Media;
-import org.springframework.ai.model.function.FunctionCallback;
-import org.springframework.ai.openai.OpenAiChatModel;
-import org.springframework.ai.openai.OpenAiChatOptions;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.core.io.ByteArrayResource;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
-import org.springframework.util.MimeTypeUtils;
+import org.springframework.web.client.RestTemplate;
+
+import jakarta.annotation.PostConstruct;
 
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
 
-/** 大语言模型（LLM）对话服务 — 集成长期记忆与 Spring AI Function Calling。 */
+// LLM 对话与图片识别服务，封装 DeepSeek Chat（文本）和 DashScope（视觉）的 API 调用
 @Slf4j
 @Service
 public class LlmService {
 
-    private final OpenAiChatModel deepSeekChatModel;
-    private final OpenAiChatModel dashScopeChatModel;
-    private final ConversationMemoryService memoryService;
-    private final List<FunctionCallback> functionCallbacks;
-    private final com.example.clawbot.tool.TextToSpeechTool textToSpeechTool;
+    private final RestTemplate restTemplate;
+    private final ChatClient chatClient;
+    private final ConversationRepository conversationRepository;
+    private final MessageRepository messageRepository;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    private static final int MAX_TOOL_ROUNDS = 30;
-    private static final int COMPRESSION_BATCH = 16;
+    private static final ZoneId DEFAULT_ZONE = ZoneId.of("Asia/Shanghai");
 
-    @Value("${deepseek.api.model}")
-    private String model;
+    @Value("${vision.api.key}")
+    private String visionApiKey;
+
+    @Value("${vision.api.base-url}")
+    private String visionBaseUrl;
 
     @Value("${vision.api.model}")
     private String visionModel;
 
-    public LlmService(
-            OpenAiChatModel deepSeekChatModel,
-            @Qualifier("dashScopeChatModel") OpenAiChatModel dashScopeChatModel,
-            ConversationMemoryService memoryService,
-            List<FunctionCallback> functionCallbacks,
-            com.example.clawbot.tool.TextToSpeechTool textToSpeechTool) {
-        this.deepSeekChatModel = deepSeekChatModel;
-        this.dashScopeChatModel = dashScopeChatModel;
-        this.memoryService = memoryService;
-        this.functionCallbacks = functionCallbacks;
-        this.textToSpeechTool = textToSpeechTool;
-    }
-
-    public static final String SYSTEM_PROMPT =
-            "你是一个友好的微信助手，请用简洁、自然的中文回答用户的问题。回答尽量控制在200字以内。";
-
-    private static final String VOICE_SYSTEM_PROMPT =
-            "你是一个语音助手，你的回复将被直接朗读给用户听。重要规则："
-                    + "1. 直接输出要朗读的内容，绝对不要加任何开场白或客套话"
-                    + "2. 不要使用emoji、表情符号和特殊字符"
-                    + "3. 不要解释你正在做什么，直接给结果";
-
-    /** 文本对话：从长期记忆获取上下文 → LLM 推理 → 追加消息到记忆 → 必要时压缩历史 */
-    public String chat(String userId, String userMessage) {
-        // "语音xxx" → 剥离前缀，LLM 生成文字后再主动调 TTS
-        boolean wantsTts = isVoiceRequest(userMessage);
-        String actualMessage = wantsTts ? stripVoicePrefix(userMessage) : userMessage;
-        log.info("chat: wantsTts={}, actualMessage={}", wantsTts, actualMessage);
-
-        List<Message> messages = new ArrayList<>();
-
-        if (wantsTts) {
-            // 语音请求：独立 prompt，不加载历史上下文（避免旧对话干扰输出风格）
-            messages.add(new SystemMessage(VOICE_SYSTEM_PROMPT));
-        } else {
-            messages.add(new SystemMessage(SYSTEM_PROMPT));
-            List<Map<String, Object>> contextMessages = memoryService.getContext(userId);
-            appendContextMessages(messages, contextMessages);
-        }
-        messages.add(new UserMessage(actualMessage));
-
-        OpenAiChatOptions options = OpenAiChatOptions.builder()
-                .model(model)
-                .temperature(0.7)
-                .maxTokens(1024)
-                .toolCallbacks(functionCallbacks)
-                .toolChoice("auto")
+    public LlmService(RestTemplate restTemplate,
+                      ChatClient.Builder chatClientBuilder,
+                      ConversationRepository conversationRepository,
+                      MessageRepository messageRepository,
+                      SqliteChatMemory chatMemory,
+                      WeatherTool weatherTool,
+                      GeocodeTool geocodeTool,
+                      SearchNearbyTool searchNearbyTool,
+                      PlanRouteTool planRouteTool,
+                      TextToSpeechTool textToSpeechTool,
+                      ReminderTool reminderTool,
+                      TarotTool tarotTool) {
+        this.restTemplate = restTemplate;
+        this.conversationRepository = conversationRepository;
+        this.messageRepository = messageRepository;
+        this.chatClient = chatClientBuilder
+                .defaultTools(
+                        weatherTool,
+                        geocodeTool,
+                        searchNearbyTool,
+                        planRouteTool,
+                        textToSpeechTool,
+                        reminderTool,
+                        tarotTool
+                )
+                .defaultAdvisors(MessageChatMemoryAdvisor.builder(chatMemory).build())
                 .build();
-
-        String[] ttsFilePathHolder = new String[1];
-        String textReply = callWithTools(messages, options, ttsFilePathHolder);
-
-        String audioPath = ttsFilePathHolder[0];
-
-        // 用户请求语音时，对 LLM 文字回复主动调用 TTS
-        if (wantsTts && audioPath == null) {
-            audioPath = invokeTts(textReply);
-        }
-
-        // 存入记忆（纯文本，不带 [audio:...] 标记，避免 LLM 学会模仿并虚构文件路径）
-        memoryService.appendMessage(userId, "user", userMessage);
-        memoryService.appendMessage(userId, "assistant", textReply);
-
-        if (memoryService.needsCompression(userId)) {
-            compressHistoryAsync(userId);
-        }
-
-        // 语音请求：只返回 [audio:path]，不附带文字
-        if (audioPath != null) {
-            return wantsTts ? "[audio:" + audioPath + "]" : "[audio:" + audioPath + "]" + textReply;
-        }
-
-        return textReply.trim();
     }
 
-    private static final String[] VOICE_REQUEST_PREFIXES = {
-        "用语音", "语音回答", "语音告诉我", "语音说下", "语音讲", "发语音", "语音"
-    };
-
-    private boolean isVoiceRequest(String msg) {
-        if (msg == null) return false;
-        for (String prefix : VOICE_REQUEST_PREFIXES) {
-            if (msg.startsWith(prefix)) {
-                return true;
-            }
-        }
-        return false;
+    @PostConstruct
+    public void init() {
+        if (visionApiKey != null) visionApiKey = visionApiKey.trim();
+        if (visionBaseUrl != null) visionBaseUrl = visionBaseUrl.trim();
+        if (visionModel != null) visionModel = visionModel.trim();
+        log.info("LLM 配置初始化完成: visionBaseUrl={}, visionModel={}", visionBaseUrl, visionModel);
     }
 
-    private String stripVoicePrefix(String msg) {
-        for (String prefix : VOICE_REQUEST_PREFIXES) {
-            if (msg.startsWith(prefix)) {
-                String content = msg.substring(prefix.length()).trim();
-                return content.isEmpty() ? msg : content;
-            }
-        }
-        return msg;
-    }
+    private static final String SYSTEM_PROMPT =
+            "你是一个友好的微信助手，请用简洁、自然的中文回答用户的问题。回答尽量控制在200字以内。\n"
+                    + "【重要规则】当用户明确要求语音回复、朗读、播报、讲故事/笑话等需要以语音形式呈现内容时，"
+                    + "你必须先生成回复内容，然后调用 text_to_speech 工具将内容转为语音。"
+                    + "调用工具后，在最终回复中保留 [audio:工具返回的file_path] 标记，以便系统发送语音给用户。\n"
+                    + "如果用户没有要求语音，不要主动调用 text_to_speech 工具。";
 
-    /** 对文本内容直接调用 TTS 工具生成语音文件，返回文件路径。 */
-    private String invokeTts(String text) {
+    public String chat(String userId, String userMessage) {
+        long startTime = System.currentTimeMillis();
+        String messagePreview = userMessage.length() > 100
+                ? userMessage.substring(0, 100) + "..."
+                : userMessage;
+        log.info("[行动] 向 DeepSeek API 发送对话请求 (model={})", chatClient != null ? "deepseek-v4-flash" : "unknown");
+        log.info("  请求内容: system提示词 + 7个Function Calling工具定义 + 对话历史 + 用户消息 \"{}\"", messagePreview);
+        log.info("  → LLM 可在本轮自动调用工具 (weather/reminder/nearby/route/geocode/tts/tarot)");
+
+        String conversationId = conversationRepository.getOrCreate(userId, userMessage);
+
         try {
-            log.info("主动调用 TTS: textLength={}", text.length());
-            String result = textToSpeechTool.textToSpeech(text);
-            JsonNode node = objectMapper.readTree(result);
-            return node.path("file_path").asText(null);
+            String reply = chatClient.prompt()
+                    .system(buildSystemPrompt(userId))
+                    .user(userMessage)
+                    .advisors(a -> a.param(
+                            AbstractChatMemoryAdvisor.CHAT_MEMORY_CONVERSATION_ID_KEY,
+                            conversationId
+                    ))
+                    .call()
+                    .content();
+
+            long elapsed = System.currentTimeMillis() - startTime;
+            String replyPreview = reply != null && reply.length() > 100
+                    ? reply.substring(0, 100) + "..."
+                    : reply;
+            log.info("[观察] DeepSeek 返回响应 (耗时{}ms, {}字符): \"{}\"",
+                    elapsed, reply != null ? reply.length() : 0, replyPreview);
+
+            return reply != null ? reply.trim() : "抱歉，我没有生成有效回复，请稍后再试。";
         } catch (Exception e) {
-            log.warn("主动 TTS 调用失败: {}", e.getMessage());
-            return null;
-        }
-    }
-
-    private String callWithTools(List<Message> messages, OpenAiChatOptions options,
-                                  String[] ttsFilePathOut) {
-        try {
-            for (int round = 0; round <= MAX_TOOL_ROUNDS; round++) {
-                Prompt prompt = new Prompt(messages, options);
-                ChatResponse response = deepSeekChatModel.call(prompt);
-                AssistantMessage assistantMsg = response.getResult().getOutput();
-
-                List<ToolCall> toolCalls = assistantMsg.getToolCalls();
-                if (toolCalls == null || toolCalls.isEmpty()) {
-                    String content = assistantMsg.getText();
-                    return (content == null || content.isBlank())
-                            ? "抱歉，我没有生成有效回复，请稍后再试。" : content;
-                }
-
-                if (round == MAX_TOOL_ROUNDS) {
-                    return "抱歉，工具调用次数过多，请换一种方式提问。";
-                }
-
-                messages.add(assistantMsg);
-
-                List<ToolResponseMessage.ToolResponse> toolResponses = new ArrayList<>();
-                for (ToolCall toolCall : toolCalls) {
-                    String toolName = toolCall.name();
-                    String toolResult;
-                    if ("text_to_speech".equals(toolName)) {
-                        toolResult = executeTtsCallback(toolCall.arguments(), ttsFilePathOut);
-                        log.info("执行工具(TTS): name={}, id={}", toolName, toolCall.id());
-                    } else {
-                        toolResult = executeCallback(toolName, toolCall.arguments());
-                        log.info("执行工具: name={}, id={}", toolName, toolCall.id());
-                    }
-                    toolResponses.add(new ToolResponseMessage.ToolResponse(
-                            toolCall.id(), toolName, toolResult));
-                }
-
-                messages.add(new ToolResponseMessage(toolResponses, Map.of()));
-            }
-            return "抱歉，我暂时无法处理，请稍后再试。";
-        } catch (Exception e) {
-            log.error("Function Calling 调用失败", e);
+            long elapsed = System.currentTimeMillis() - startTime;
+            log.error("[异常] DeepSeek API 调用失败 (耗时{}ms) | 原因: {} | 建议: 检查 deepseek.api.key 配置和网络连接",
+                    elapsed, e.getMessage(), e);
             return "抱歉，我暂时无法处理，请稍后再试。";
         }
     }
 
-    /** 直接调用 TTS 工具（绕过 ToolCallback 避免返回值被二次 JSON 编码）。 */
-    private String executeTtsCallback(String arguments, String[] ttsFilePathOut) {
-        try {
-            JsonNode argNode = objectMapper.readTree(arguments);
-            String text = argNode.path("text").asText("");
-            String result = textToSpeechTool.textToSpeech(text);
-            JsonNode resultNode = objectMapper.readTree(result);
-            String path = resultNode.path("file_path").asText(null);
-            if (path != null) {
-                ttsFilePathOut[0] = path;
-            }
-            return result;
-        } catch (Exception e) {
-            log.warn("TTS 工具执行失败: {}", e.getMessage());
-            return "{\"error\":\"TTS 执行失败\"}";
-        }
+    private String buildSystemPrompt(String userId) {
+        String currentTime = OffsetDateTime.now(DEFAULT_ZONE).toString();
+        return SYSTEM_PROMPT
+                + " 当前时间是 " + currentTime + "，当前时区是 Asia/Shanghai。"
+                + " 当前用户ID是 " + userId + "，调用需要 user_id 参数的工具时请传入此值。"
+                + " 创建提醒时必须把用户表达的时间转换为带时区的 ISO 8601 格式；"
+                + "如果用户没有提供明确时间，应先询问用户。";
     }
-
-    private String executeCallback(String functionName, String arguments) {
-        for (FunctionCallback fc : functionCallbacks) {
-            if (fc.getName().equals(functionName)) {
-                return fc.call(arguments);
-            }
-        }
-        return "工具调用失败：未找到工具 " + functionName;
-    }
-
-    private void compressHistoryAsync(String userId) {
-        try {
-            List<Map<String, Object>> oldMessages = memoryService.extractForCompression(userId, COMPRESSION_BATCH);
-            if (oldMessages.isEmpty()) return;
-
-            String summary = summarizeMessages(oldMessages);
-            if (summary != null && !summary.isBlank()) {
-                memoryService.appendLongTermMemory(userId, summary);
-            }
-        } catch (Exception e) {
-            log.warn("压缩对话历史失败: userId={}, error={}", userId, e.getMessage());
-        }
-    }
-
-    private String summarizeMessages(List<Map<String, Object>> messages) {
-        StringBuilder transcript = new StringBuilder();
-        for (Map<String, Object> msg : messages) {
-            String role = String.valueOf(msg.getOrDefault("role", ""));
-            String content = String.valueOf(msg.getOrDefault("content", ""));
-            transcript.append(role).append(": ").append(content).append("\n");
-        }
-
-        String promptText = "请用一段简洁的中文（不超过150字）总结以下对话的核心内容和关键信息。只输出摘要文本，不要加任何前缀：\n\n" + transcript;
-
-        List<Message> msgs = List.of(
-                new SystemMessage("你是一个对话摘要助手，请用简洁的中文提取对话中的关键信息。"),
-                new UserMessage(promptText)
-        );
-
-        Prompt p = new Prompt(msgs, OpenAiChatOptions.builder()
-                .model(model)
-                .temperature(0.3)
-                .maxTokens(256)
-                .build());
-
-        try {
-            ChatResponse response = deepSeekChatModel.call(p);
-            String summary = response.getResult().getOutput().getText();
-            return (summary != null && !summary.isBlank()) ? summary.trim() : null;
-        } catch (Exception e) {
-            log.warn("生成对话摘要失败: {}", e.getMessage());
-            return null;
-        }
-    }
-
-    // ─── 图片识别 ──────────────────────────────────────────
 
     public String chatWithImage(String userId, byte[] imageBytes, String fileName) {
+        long startTime = System.currentTimeMillis();
+        log.info("[行动] 调用 DashScope 视觉模型 (model=qwen3.7-plus): 上传图片 ({} bytes) 并请求内容描述", imageBytes.length);
+
+        String conversationId = conversationRepository.getOrCreate(userId, "[发送了一张图片]");
+
+        String base64 = Base64.getEncoder().encodeToString(imageBytes);
         String mimeType = getMimeType(fileName);
+        String dataUrl = "data:" + mimeType + ";base64," + base64;
 
-        var userMessage = new UserMessage(
-                "请详细描述这张图片的内容。用友好、简洁的中文回复，控制在200字以内。",
-                List.of(new Media(MimeTypeUtils.parseMimeType(mimeType),
-                        new ByteArrayResource(imageBytes))));
-
-        List<Map<String, Object>> contextMessages = memoryService.getContext(userId);
-
-        List<Message> messages = new ArrayList<>();
-        messages.add(new SystemMessage(SYSTEM_PROMPT));
-        appendContextMessages(messages, contextMessages);
-        messages.add(userMessage);
-
-        Prompt prompt = new Prompt(messages, OpenAiChatOptions.builder()
-                .model(visionModel)
-                .maxTokens(1024)
-                .build());
-
-        String reply = callVision(prompt);
-
-        memoryService.appendMessage(userId, "user", "[发送了一张图片]");
-        memoryService.appendMessage(userId, "assistant", reply);
-
-        if (memoryService.needsCompression(userId)) {
-            compressHistoryAsync(userId);
-        }
-
-        return reply;
-    }
-
-    private void appendContextMessages(List<Message> messages, List<Map<String, Object>> contextMessages) {
-        for (Map<String, Object> ctxMsg : contextMessages) {
-            String role = String.valueOf(ctxMsg.getOrDefault("role", ""));
-            String content = String.valueOf(ctxMsg.getOrDefault("content", ""));
-            if ("system".equals(role)) {
-                messages.add(new SystemMessage(content));
-            } else if ("assistant".equals(role)) {
-                messages.add(new AssistantMessage(content));
-            } else {
-                messages.add(new UserMessage(content));
-            }
-        }
-    }
-
-    private String callVision(Prompt prompt) {
         try {
-            ChatResponse response = dashScopeChatModel.call(prompt);
-            String content = response.getResult().getOutput().getText();
-            log.info("Vision 回复: {}", content);
-            return (content != null && !content.isBlank()) ? content.trim()
-                    : "抱歉，我暂时无法处理，请稍后再试。";
+            List<Map<String, Object>> contentParts = new ArrayList<>();
+            contentParts.add(Map.of("type", "text", "text",
+                    "请详细描述这张图片的内容。用友好、简洁的中文回复，控制在200字以内。"));
+            contentParts.add(Map.of(
+                    "type", "image_url",
+                    "image_url", Map.of("url", dataUrl)
+            ));
+
+            List<Map<String, Object>> messages = new ArrayList<>();
+            messages.add(Map.of("role", "system", "content", SYSTEM_PROMPT));
+
+            List<Map<String, Object>> history = messageRepository.findRecentByConversationId(conversationId);
+            for (Map<String, Object> row : history) {
+                messages.add(Map.of("role", row.get("role"), "content", row.get("content")));
+            }
+
+            messages.add(Map.of("role", "user", "content", contentParts));
+
+            Map<String, Object> requestBody = Map.of(
+                    "model", visionModel,
+                    "messages", messages,
+                    "max_tokens", 1024
+            );
+
+            String reply = callLlm(visionBaseUrl, visionApiKey, requestBody);
+
+            messageRepository.insert(conversationId, "user", "[发送了一张图片]", "image", null);
+            messageRepository.insert(conversationId, "assistant", reply, "text", null);
+
+            long elapsed = System.currentTimeMillis() - startTime;
+            log.info("[观察] DashScope 视觉模型返回描述 ({}字符, 耗时{}ms)",
+                    reply != null ? reply.length() : 0, elapsed);
+            return reply;
         } catch (Exception e) {
-            log.error("Vision 调用失败: {}", e.getMessage());
+            long elapsed = System.currentTimeMillis() - startTime;
+            log.error("[异常] DashScope 视觉模型调用失败 (耗时{}ms) | 原因: {} | 建议: 检查 vision.api.key 配置",
+                    elapsed, e.getMessage(), e);
+            return "抱歉，图片识别暂时不可用。";
+        }
+    }
+
+    private String callLlm(String apiUrl, String key, Map<String, Object> requestBody) {
+        try {
+            JsonNode message = callChatCompletion(apiUrl, key, requestBody);
+            String content = message.path("content").asText("").trim();
+            log.info("LLM 回复: {}", content);
+            return content.isEmpty() ? "抱歉，我暂时无法处理，请稍后再试。" : content;
+        } catch (Exception e) {
+            log.error("LLM 调用失败: {}", e.getMessage());
             return "抱歉，AI 服务暂时不可用。";
         }
+    }
+
+    private JsonNode callChatCompletion(String apiUrl, String key,
+                                        Map<String, Object> requestBody) throws Exception {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(key);
+        String requestJson = objectMapper.writeValueAsString(requestBody);
+        log.info("LLM 请求: model={}, url={}", requestBody.get("model"), apiUrl);
+        HttpEntity<String> entity = new HttpEntity<>(requestJson, headers);
+        ResponseEntity<String> response = restTemplate.postForEntity(
+                apiUrl + "/v1/chat/completions", entity, String.class);
+
+        String responseBody = response.getBody();
+        if (responseBody == null) {
+            throw new IllegalStateException("LLM 返回空响应");
+        }
+
+        JsonNode root = objectMapper.readTree(responseBody);
+        if (root.has("error")) {
+            throw new IllegalStateException("LLM API 错误: " + root.get("error"));
+        }
+
+        JsonNode choices = root.path("choices");
+        if (!choices.isArray() || choices.isEmpty()
+                || choices.get(0).path("message").isMissingNode()) {
+            throw new IllegalStateException("LLM 响应缺少 choices[0].message");
+        }
+        return choices.get(0).path("message");
     }
 
     private String getMimeType(String fileName) {
