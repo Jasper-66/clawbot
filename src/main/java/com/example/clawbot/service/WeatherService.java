@@ -9,69 +9,19 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
-/**
- * 天气查询服务 — 实时天气数据提供者。
- *
- * <p>调用<a href="https://www.seniverse.com/">心知天气</a>（seniverse.com）API
- * 查询指定城市的实时天气信息，包括天气状况、温度和更新时间。</p>
- *
- * <h3>API 说明</h3>
- * <p>使用心知天气 v3 免费版 API，端点：
- * {@code GET https://api.seniverse.com/v3/weather/now.json?key=xxx&location=北京&language=zh-Hans&unit=c}</p>
- *
- * <p>免费版限制：仅支持国内城市、QPS 较低、数据更新频率为小时级。</p>
- *
- * <h3>错误处理</h3>
- * <p>三层异常捕获，逐级细化：</p>
- * <ol>
- *   <li>{@link org.springframework.web.client.HttpClientErrorException} — HTTP 4xx 错误（如 API key 无效）</li>
- *   <li>通用 {@link Exception} — 网络超时、JSON 解析失败等</li>
- *   <li>所有异常均返回用户可读的错误提示，不向上层抛出</li>
- * </ol>
- *
- * <p>被 {@link com.example.clawbot.tool.WeatherTool} 调用，
- * 也可由其他业务代码直接注入使用。</p>
- *
- * @see com.example.clawbot.tool.WeatherTool
- */
 @Slf4j
+// 天气查询服务，调用心知天气 API 获取城市实时天气
 @Service
 @RequiredArgsConstructor
 public class WeatherService {
 
-    /** HTTP 客户端，用于 GET 请求心知天气 API */
     private final RestTemplate restTemplate;
 
-    /** Jackson JSON 解析器 */
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    /**
-     * 心知天气 API 密钥。
-     *
-     * <p>默认值为空字符串（防止 Spring 注入失败），
-     * 生产环境应在 {@code application.properties} 中配置
-     * {@code weather.api.key}。</p>
-     */
     @Value("${weather.api.key:}")
     private String weatherApiKey;
 
-    /**
-     * 查询指定城市的实时天气。
-     *
-     * <p>API 未配置时返回友好提示，避免空指针异常。</p>
-     *
-     * <h3>返回示例</h3>
-     * <pre>
-     * 📍 北京 当前天气
-     *
-     * ☁️ 天气：晴
-     * 🌡 温度：25°C
-     * ⏰ 更新：2024-01-15 14:30:00
-     * </pre>
-     *
-     * @param city 城市名称，如 "北京"、"上海"、"杭州"
-     * @return 格式化的天气信息文本（含 emoji 图标），或错误提示
-     */
     public String getWeather(String city) {
         // 前置检查：API Key 未配置时返回友好提示
         if (weatherApiKey == null || weatherApiKey.trim().isEmpty()) {
