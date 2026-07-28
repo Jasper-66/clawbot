@@ -36,7 +36,10 @@ build/
 node_modules/
 
 ### Claude Code ###
-.claude/settings.local.json
+.claude/
+
+### Database ###
+*.db
 
 ### Sensitive Config ###
 application.properties

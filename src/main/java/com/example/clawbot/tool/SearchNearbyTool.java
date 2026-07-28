@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
@@ -81,6 +83,51 @@ public class SearchNearbyTool {
      */
     public String getToolName() {
         return NAME;
+    }
+
+    @Tool(name = "search_nearby", description = "搜索指定位置周边的 POI（兴趣点），如餐厅、商店、景点等。location 参数必须为 经度,纬度 格式。")
+    public String searchNearby(
+            @ToolParam(required = true, description = "中心点坐标，格式：经度,纬度，如 116.473168,39.993015") String location,
+            @ToolParam(required = false, description = "搜索关键词，如：火锅、咖啡、药店") String keywords,
+            @ToolParam(required = false, description = "POI 类型，如：餐饮服务、购物服务") String types,
+            @ToolParam(required = false, description = "搜索半径（米），默认 3000，最大 50000") Integer radius) {
+        if (location == null || location.trim().isEmpty()) {
+            return "工具调用失败：location 参数不能为空";
+        }
+        if (!location.trim().matches("^-?\\d+\\.\\d+,-?\\d+\\.\\d+$")) {
+            return "工具调用失败：location 格式不正确，应为 经度,纬度";
+        }
+        int r = radius == null ? DEFAULT_RADIUS : Math.max(1, Math.min(radius, MAX_RADIUS));
+        try {
+            log.info("执行周边搜索: location={}, keywords={}", location, keywords);
+            URI uri = buildUri(location.trim(),
+                    keywords == null ? "" : keywords.trim(),
+                    types == null ? "" : types.trim(), r, "distance");
+            String response = restTemplate.getForObject(uri, String.class);
+            JsonNode root = objectMapper.readTree(response);
+            if (!"1".equals(root.path("status").asText("0"))) {
+                return "{\"error\":\"周边搜索失败\"}";
+            }
+            JsonNode pois = root.path("pois");
+            List<Map<String, Object>> results = new java.util.ArrayList<>();
+            int count = 0;
+            if (pois.isArray()) {
+                for (JsonNode poi : pois) {
+                    if (count >= MAX_RESULTS) break;
+                    results.add(Map.of(
+                            "name", poi.path("name").asText(""),
+                            "address", poi.path("address").asText(""),
+                            "distance", poi.path("distance").asText(""),
+                            "tel", poi.path("tel").asText("")
+                    ));
+                    count++;
+                }
+            }
+            return objectMapper.writeValueAsString(Map.of("count", results.size(), "results", results));
+        } catch (Exception e) {
+            log.error("周边搜索工具执行失败: {}", e.getMessage());
+            return "工具调用失败：" + e.getMessage();
+        }
     }
 
     /**

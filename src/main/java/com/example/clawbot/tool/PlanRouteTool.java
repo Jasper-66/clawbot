@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
@@ -88,6 +90,36 @@ public class PlanRouteTool {
      */
     public String getToolName() {
         return NAME;
+    }
+
+    @Tool(name = "plan_route", description = "规划从起点到终点的驾车路线。起点由 location 参数指定（经纬度格式），终点通过 keywords 搜索周边 POI 确定或直接指定 destination。")
+    public String planRoute(
+            @ToolParam(required = true, description = "起点坐标，格式：经度,纬度") String location,
+            @ToolParam(required = false, description = "终点坐标，格式：经度,纬度") String destination,
+            @ToolParam(required = false, description = "终点搜索关键词，如：海底捞、加油站") String keywords) {
+        if (location == null || location.trim().isEmpty()) {
+            return "工具调用失败：location 参数不能为空";
+        }
+        if (!location.trim().matches("^-?\\d+\\.\\d+,-?\\d+\\.\\d+$")) {
+            return "工具调用失败：location 格式不正确，应为 经度,纬度";
+        }
+        try {
+            String dest = destination;
+            if (dest == null || dest.trim().isEmpty()) {
+                if (keywords == null || keywords.trim().isEmpty()) {
+                    return "工具调用失败：keywords 或 destination 至少提供一个";
+                }
+                dest = searchDestination(location.trim(), keywords.trim(), "", DEFAULT_RADIUS, "distance");
+                if (dest == null) return "{\"error\":\"未找到匹配的终点地点\"}";
+            } else if (!dest.trim().matches("^-?\\d+\\.\\d+,-?\\d+\\.\\d+$")) {
+                return "工具调用失败：destination 格式不正确，应为 经度,纬度";
+            }
+            log.info("执行路线规划: origin={}, destination={}", location, dest);
+            return planRoute(location.trim(), dest.trim());
+        } catch (Exception e) {
+            log.error("路线规划工具执行失败: {}", e.getMessage());
+            return "工具调用失败：" + e.getMessage();
+        }
     }
 
     /**

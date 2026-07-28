@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -73,6 +75,22 @@ public class WeatherTool {
      */
     public String getToolName() {
         return NAME;
+    }
+
+    /**
+     * Spring AI @Tool 方法 — 供 ChatClient 自动注册为 Function Callback。
+     */
+    @Tool(name = "get_weather", description = "查询指定城市的实时天气信息，包括天气状况、温度和更新时间。当用户询问某个城市的天气时使用此工具。")
+    public String getWeather(
+            @ToolParam(required = true, description = "城市名称，例如：北京、上海、深圳") String city) {
+        if (city == null || city.trim().isEmpty()) {
+            return "工具调用失败：city 参数不能为空";
+        }
+        if (city.length() > MAX_CITY_LENGTH) {
+            return "工具调用失败：city 参数过长";
+        }
+        log.info("执行天气工具: city={}", city);
+        return weatherService.getWeather(city.trim());
     }
 
     /**

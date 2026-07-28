@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Component;
 
 import java.nio.file.Files;
@@ -76,6 +78,38 @@ public class TextToSpeechTool {
      */
     public String getToolName() {
         return NAME;
+    }
+
+    @Tool(name = "text_to_speech", description = "将文字合成为 WAV 格式的语音。当用户希望听到某段文字的朗读、生成语音消息时使用此工具。")
+    public String synthesizeSpeech(
+            @ToolParam(required = true, description = "要转换为语音的文字内容") String text) {
+        if (text == null || text.trim().isEmpty()) {
+            return "工具调用失败：text 参数不能为空";
+        }
+        if (text.length() > MAX_TEXT_LENGTH) {
+            return "工具调用失败：text 参数过长（最大 " + MAX_TEXT_LENGTH + " 字符）";
+        }
+        try {
+            log.info("执行语音合成工具: textLength={}", text.length());
+            byte[] wavBytes = speechService.textToSpeech(DEFAULT_USER_ID, text.trim());
+            if (wavBytes == null || wavBytes.length == 0) {
+                return "工具调用失败：语音合成返回为空";
+            }
+            Path audioDir = Paths.get(AUDIO_DIR);
+            Files.createDirectories(audioDir);
+            String fileName = "tts_" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString().substring(0, 8) + ".wav";
+            Path filePath = audioDir.resolve(fileName);
+            Files.write(filePath, wavBytes);
+            log.info("语音文件已保存: path={}, size={} bytes", filePath.toAbsolutePath(), wavBytes.length);
+            return objectMapper.writeValueAsString(Map.of(
+                    "format", "wav", "size", wavBytes.length,
+                    "file_path", filePath.toAbsolutePath().toString(),
+                    "message", "语音已生成并保存到本地文件"
+            ));
+        } catch (Exception e) {
+            log.error("语音合成工具执行失败: {}", e.getMessage());
+            return "工具调用失败：语音合成异常: " + e.getMessage();
+        }
     }
 
     /**

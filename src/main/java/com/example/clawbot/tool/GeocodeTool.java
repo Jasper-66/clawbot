@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
@@ -81,6 +83,51 @@ public class GeocodeTool {
      */
     public String getToolName() {
         return NAME;
+    }
+
+    @Tool(name = "geocode", description = "根据地名查询经纬度坐标。当用户提到某个地点、地址或城市，且后续需要基于经纬度调用其他工具时使用此工具。")
+    public String geocode(
+            @ToolParam(required = true, description = "地点名称或地址，如：北京故宫、上海市浦东新区") String place) {
+        if (place == null || place.trim().isEmpty()) {
+            return "工具调用失败：place 参数不能为空";
+        }
+        if (place.length() > MAX_PLACE_LENGTH) {
+            return "工具调用失败：place 参数过长";
+        }
+        try {
+            log.info("执行地址解析工具: place={}", place);
+            URI uri = UriComponentsBuilder.fromUriString(GEOCODE_URL)
+                    .queryParam("key", amapApiKey)
+                    .queryParam("address", place.trim())
+                    .encode(StandardCharsets.UTF_8)
+                    .build().toUri();
+            String response = restTemplate.getForObject(uri, String.class);
+            JsonNode root = objectMapper.readTree(response);
+            if (!"1".equals(root.path("status").asText("0"))) {
+                return "{\"error\":\"地址解析失败：" + root.path("info").asText("未知错误") + "\"}";
+            }
+            JsonNode geocodes = root.path("geocodes");
+            if (!geocodes.isArray() || geocodes.isEmpty()) {
+                return "{\"error\":\"未找到地点：" + place + "\"}";
+            }
+            JsonNode result = geocodes.get(0);
+            String location = result.path("location").asText("");
+            String[] parts = location.split(",");
+            if (parts.length != 2) return "{\"error\":\"坐标格式异常\"}";
+            return objectMapper.writeValueAsString(Map.of(
+                    "name", result.path("formatted_address").asText(place),
+                    "location", location,
+                    "longitude", Double.parseDouble(parts[0]),
+                    "latitude", Double.parseDouble(parts[1]),
+                    "country", result.path("country").asText(""),
+                    "province", result.path("province").asText(""),
+                    "city", result.path("city").asText(""),
+                    "district", result.path("district").asText("")
+            ));
+        } catch (Exception e) {
+            log.error("地址解析工具执行失败: {}", e.getMessage());
+            return "工具调用失败：" + e.getMessage();
+        }
     }
 
     /**

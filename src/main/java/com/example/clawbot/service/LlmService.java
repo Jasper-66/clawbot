@@ -1,137 +1,83 @@
 package com.example.clawbot.service;
 
-import com.example.clawbot.tool.GeocodeTool;
-import com.example.clawbot.tool.PlanRouteTool;
-import com.example.clawbot.tool.SearchNearbyTool;
-import com.example.clawbot.tool.CalendarTool;
-import com.example.clawbot.tool.TarotTool;
-import com.example.clawbot.tool.TextToSpeechTool;
-import com.example.clawbot.tool.WeatherTool;
+import com.example.clawbot.memory.JpaChatMemory;
+import com.example.clawbot.tool.*;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.model.Media;
+import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
+import org.springframework.util.MimeTypeUtils;
 import org.springframework.web.client.RestTemplate;
 
-import java.util.ArrayList;
-import java.util.Base64;
-import java.util.LinkedHashMap;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.*;
 
 /**
  * 大语言模型（LLM）对话服务。
  *
- * <p>提供文本对话、图片识别两大核心能力，支持 Function Calling（工具调用）。</p>
- *
- * <h3>功能特性</h3>
- * <ul>
- *   <li><b>多轮对话</b>：每个用户独立维护最近 10 轮对话历史</li>
- *   <li><b>工具调用</b>：支持天气查询、地理编码、周边搜索、路线规划、语音合成、塔罗占卜、日历查询等工具</li>
- *   <li><b>图片识别</b>：通过多模态 Vision API 分析用户发送的图片内容</li>
- * </ul>
- *
- * <p>使用 DeepSeek API 进行文本对话，DashScope API 进行图片识别。</p>
- *
- * @see com.example.clawbot.tool.WeatherTool
- * @see com.example.clawbot.tool.GeocodeTool
- * @see com.example.clawbot.tool.SearchNearbyTool
- * @see com.example.clawbot.tool.PlanRouteTool
- * @see com.example.clawbot.tool.TextToSpeechTool
- * @see com.example.clawbot.tool.TarotTool
- * @see com.example.clawbot.tool.CalendarTool
+ * <p>使用 RestTemplate 直接调用 DeepSeek API（支持 Function Calling），
+ * 聊天记忆通过 {@link JpaChatMemory} 持久化到 SQLite。</p>
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class LlmService {
 
-    /** HTTP 客户端，用于调用外部 API */
     private final RestTemplate restTemplate;
-
-    /** 天气查询工具 */
-    private final WeatherTool weatherTool;
-
-    /** 地理编码工具（地址转经纬度） */
-    private final GeocodeTool geocodeTool;
-
-    /** 周边搜索工具 */
-    private final SearchNearbyTool searchNearbyTool;
-
-    /** 路线规划工具 */
-    private final PlanRouteTool planRouteTool;
-
-    /** 语音合成工具 */
-    private final TextToSpeechTool textToSpeechTool;
-
-    /** 塔罗占卜工具 */
-    private final TarotTool tarotTool;
-
-    /** 日历查询工具（黄历/节假日/放假安排） */
-    private final CalendarTool calendarTool;
-
-    /** JSON 解析器 */
+    private final JpaChatMemory chatMemory;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    /**
-     * 用户对话历史缓存。
-     *
-     * <p>Key 为用户唯一标识（微信 userId），Value 为该用户的对话消息列表。
-     * LinkedList 保证有序，支持高效的头部删除（淘汰旧消息）。</p>
-     */
-    private final ConcurrentHashMap<String, LinkedList<Map<String, Object>>> conversations = new ConcurrentHashMap<>();
+    private final WeatherTool weatherTool;
+    private final DateTimeTool dateTimeTool;
+    private final TextToSpeechTool textToSpeechTool;
+    private final GeocodeTool geocodeTool;
+    private final SearchNearbyTool searchNearbyTool;
+    private final PlanRouteTool planRouteTool;
+    private final TarotTool tarotTool;
+    private final RemindTool remindTool;
+    private final ScheduledTaskTool scheduledTaskTool;
+    private final ImageGenerationTool imageGenerationTool;
 
-    /** 每个用户最多保留的对话轮数（一问一答 = 2 条消息） */
-    private static final int MAX_HISTORY = 10;
-
-    /** Function Calling 最大工具调用轮数，防止无限循环（如模型反复调用同一工具） */
-    private static final int MAX_TOOL_ROUNDS = 30;
-
-    /** DeepSeek API 密钥 */
     @Value("${deepseek.api.key}")
     private String apiKey;
 
-    /** DeepSeek API 基础地址（如 https://api.deepseek.com） */
     @Value("${deepseek.api.base-url}")
     private String baseUrl;
 
-    /** DeepSeek 对话模型名称（如 deepseek-chat） */
     @Value("${deepseek.api.model}")
     private String model;
 
-    /** DashScope Vision API 密钥（与语音服务共用） */
     @Value("${vision.api.key}")
     private String visionApiKey;
 
-    /** DashScope Vision API 基础地址 */
     @Value("${vision.api.base-url}")
     private String visionBaseUrl;
 
-    /** 多模态 Vision 模型名称（如 qwen-vl-plus） */
     @Value("${vision.api.model}")
     private String visionModel;
 
-    /**
-     * 系统提示词（System Prompt），定义机器人的行为准则。
-     *
-     * <p>关键指令：</p>
-     * <ul>
-     *   <li>用简洁自然的中文回复，控制在 200 字以内</li>
-     *   <li>调用 text_to_speech 工具后，必须在回复中保留 {@code [audio:文件路径]} 标记，
-     *       供 WeChatBotService 识别并发送语音消息</li>
-     * </ul>
-     */
+    private static final int MAX_HISTORY = 100;
+    private static final int MAX_TOOL_ROUNDS = 10;
+
     private static final String SYSTEM_PROMPT =
             "你是一个友好的微信助手，请用简洁、自然的中文回答用户的问题。回答尽量控制在200字以内。\n"
-                    + "【重要规则】当用户明确要求语音回复、朗读、播报、讲故事/笑话等需要以语音形式呈现内容时，"
+                    + "【工具调用规则】\n"
+                    + "1. 当用户需要执行操作（设置提醒、查天气、生成图片等）时，必须调用对应工具完成。\n"
+                    + "2. 绝对禁止在未调用工具或工具未返回成功结果的情况下，声称操作已成功。"
+                    + "如果你调用了工具但没有收到成功结果，必须如实告知用户操作未完成。\n"
+                    + "3. 需要多步操作时（如先查询再创建），必须逐步调用所有必要的工具，不能跳过任何步骤。\n"
+                    + "【语音规则】当用户明确要求语音回复、朗读、播报、讲故事/笑话等需要以语音形式呈现内容时，"
                     + "你必须先生成回复内容，然后调用 text_to_speech 工具将内容转为语音。"
                     + "调用工具后，在最终回复中保留 [audio:工具返回的file_path] 标记，以便系统发送语音给用户。\n"
                     + "如果用户没有要求语音，不要主动调用 text_to_speech 工具。\n"
@@ -142,45 +88,31 @@ public class LlmService {
                     + "3. 如用户询问具体的诊断或治疗问题，请引导其前往医院就诊";
 
     /**
-     * 文本对话入口（面向 WeChatBotService 的主接口）。
-     *
-     * <p>完整的对话处理流程：</p>
-     * <ol>
-     *   <li>从 {@code conversations} Map 获取或创建该用户的对话历史（{@link LinkedList}）</li>
-     *   <li>组装消息列表：系统提示词 → 历史消息（最多 {@value #MAX_HISTORY} 轮）→ 当前用户消息</li>
-     *   <li>在请求中注册全部 8 个工具定义，设置 {@code tool_choice: "auto"} 让模型自行决定是否调用</li>
-     *   <li>调用 {@link #callLlmWithTools} 进入 Function Calling 闭环</li>
-     *   <li>将本轮用户消息和助手最终回复追加到历史，超出上限则淘汰最早的一轮</li>
-     * </ol>
-     *
-     * <p><b>线程安全</b>：对单用户历史列表的操作通过 {@code synchronized} 块保护，
-     * 避免同一用户并发请求导致历史数据错乱或 {@link java.util.ConcurrentModificationException}。</p>
-     *
-     * @param userId      用户唯一标识（微信的 from_user_id）
-     * @param userMessage 用户发送的原始文本消息
-     * @return 助手回复文本，可直接发送给用户；异常时返回友好的错误提示而非抛异常
+     * 文本对话入口 — 使用 RestTemplate 调用 DeepSeek API，支持 Function Calling。
      */
     public String chat(String userId, String userMessage) {
         log.info("========== 新对话开始 ==========");
         log.info("用户 [{}]: {}", userId, userMessage);
-        log.info("Function Calling 调度模型: {} ({}{})", model,
-                baseUrl.endsWith("/") ? baseUrl : baseUrl + "/", "v1/chat/completions");
 
-        // 获取或创建该用户的对话历史列表
-        LinkedList<Map<String, Object>> history = conversations.computeIfAbsent(userId, k -> new LinkedList<>());
+        // 1. 从 SQLite 加载历史
+        List<Message> history = chatMemory.get(userId, MAX_HISTORY);
 
-        // 组装消息：system prompt（含当前日期） → 历史消息 → 当前用户消息
+        // 2. 组装消息列表
         String today = java.time.LocalDate.now().toString();
-        String systemContent = SYSTEM_PROMPT + "\n当前日期：" + today + "，请基于此日期回答用户关于时间、日期的问题。";
         List<Map<String, Object>> messages = new ArrayList<>();
-        messages.add(Map.of("role", "system", "content", systemContent));
+        messages.add(Map.of("role", "system", "content",
+                SYSTEM_PROMPT + "\n当前日期：" + today + "，请基于此日期回答用户关于时间、日期的问题。"));
 
-        synchronized (history) {
-            messages.addAll(history);
+        for (Message msg : history) {
+            if (msg instanceof UserMessage um) {
+                messages.add(Map.of("role", "user", "content", um.getText()));
+            } else if (msg instanceof AssistantMessage am) {
+                messages.add(Map.of("role", "assistant", "content", am.getText()));
+            }
         }
         messages.add(Map.of("role", "user", "content", userMessage));
 
-        // 构建请求体：注册工具 + 设置参数
+        // 3. 构建请求体（包含工具定义）
         Map<String, Object> requestBody = new LinkedHashMap<>();
         requestBody.put("model", model);
         requestBody.put("messages", messages);
@@ -188,112 +120,96 @@ public class LlmService {
         requestBody.put("max_tokens", 1024);
         requestBody.put("tools", List.of(
                 weatherTool.getToolDefinition(),
+                dateTimeTool.getToolDefinition(),
+                textToSpeechTool.getToolDefinition(),
                 geocodeTool.getToolDefinition(),
                 searchNearbyTool.getToolDefinition(),
                 planRouteTool.getToolDefinition(),
-                textToSpeechTool.getToolDefinition(),
                 tarotTool.getToolDefinition(),
-                calendarTool.getToolDefinition()
+                remindTool.getToolDefinition(),
+                scheduledTaskTool.getToolDefinition(),
+                imageGenerationTool.getToolDefinition()
         ));
-        requestBody.put("tool_choice", "auto"); // 让模型自行决定是否调用
+        requestBody.put("tool_choice", "auto");
 
-        // 进入 Function Calling 闭环
-        String reply = callLlmWithTools(requestBody, messages);
-
-        // 更新对话历史（线程安全），淘汰旧消息
-        synchronized (history) {
-            history.add(Map.of("role", "user", "content", userMessage));
-            history.add(Map.of("role", "assistant", "content", reply));
-            while (history.size() > MAX_HISTORY) {
-                history.removeFirst();
-            }
+        // 4. Function Calling 循环（设置 RemindTool 的用户上下文）
+        RemindContextHolder.setUserId(userId);
+        String reply;
+        try {
+            reply = callWithToolLoop(requestBody, messages);
+        } finally {
+            RemindContextHolder.clear();
         }
 
-        log.info("---------- 最终回复给用户 ----------");
-        log.info("回复内容: {}", reply.trim());
-        log.info("========== 对话结束 ==========");
+        // 5. 保存到 SQLite
+        chatMemory.add(userId, List.of(
+                new UserMessage(userMessage),
+                new AssistantMessage(reply)
+        ));
 
-        return reply.trim();
+        String finalReply = deduplicateReply(reply.trim());
+
+        log.info("---------- 最终回复给用户 ----------");
+        log.info("回复内容: [{}]", finalReply.replace("\n", " | "));
+        log.info("========== 对话结束 ==========");
+        return finalReply;
     }
 
     /**
-     * Function Calling 闭环处理 — ReAct 循环的简化实现。
-     *
-     * <p>这是 LLM 工具调用的核心循环逻辑：</p>
-     * <ol>
-     *   <li>调用 Chat Completion API，获取助手响应</li>
-     *   <li>检查响应的 {@code finish_reason}：
-     *     <ul>
-     *       <li>{@code stop} — 模型已完成回答，提取 {@code content} 文本返回给用户</li>
-     *       <li>{@code tool_calls} — 模型决定调用一个或多个工具，继续下一步</li>
-     *     </ul>
-     *   </li>
-     *   <li>遍历 {@code tool_calls} 数组，解析每个工具的名称（name）和参数（arguments）</li>
-     *   <li>调用 {@link #executeTool} 执行对应工具，获取结果</li>
-     *   <li>将助手工具调用消息（role=assistant, tool_calls）和各工具结果（role=tool）追加到 messages</li>
-     *   <li>回到步骤 1，模型看到工具结果后决定是继续调用工具还是给出最终回答</li>
-     * </ol>
-     *
-     * <h3>安全保护</h3>
-     * <p>最多执行 {@value #MAX_TOOL_ROUNDS} 轮工具调用。如果模型陷入循环
-     * （例如反复调用同一工具），达到上限后返回友好提示而非死循环。</p>
-     *
-     * <h3>DeepSeek 思考模式兼容</h3>
-     * <p>DeepSeek R1 等推理模型在工具调用消息中包含 {@code reasoning_content} 字段，
-     * 必须通过 {@link #toAssistantToolCallMessage} 原样保留并回传，
-     * 否则 API 会返回 400 错误。</p>
-     *
-     * @param requestBody 请求体 Map — 在此方法内被更新以反映最新消息状态
-     * @param messages    消息列表 — 被追加工具调用消息和工具结果消息
-     * @return 模型最终的文本回复；超轮数或异常时返回兜底提示
+     * Function Calling 循环。
      */
-    private String callLlmWithTools(Map<String, Object> requestBody,
-                                    List<Map<String, Object>> messages) {
+    private String callWithToolLoop(Map<String, Object> requestBody, List<Map<String, Object>> messages) {
         try {
-            for (int toolRound = 0; toolRound <= MAX_TOOL_ROUNDS; toolRound++) {
-                // 1. 调用 LLM
-                JsonNode assistant = callChatCompletion(baseUrl, apiKey, requestBody);
+            boolean[] hasCreateAction = {false};
+            String lastReply = null;
+
+            for (int round = 0; round <= MAX_TOOL_ROUNDS; round++) {
+                JsonNode assistant = callChatCompletion(requestBody);
                 JsonNode toolCalls = assistant.path("tool_calls");
 
-                // 2. 无工具调用 → 模型已完成回答
+                // 无工具调用 → 检查是否幻觉后返回
                 if (!toolCalls.isArray() || toolCalls.isEmpty()) {
                     String content = assistant.path("content").asText("").trim();
-                    if (!content.isEmpty()) {
-                        log.info("[{}] 生成最终回复 (无工具调用)", model);
+                    if (content.isEmpty()) content = "抱歉，我没有生成有效回复，请稍后再试。";
+
+                    // 幻觉检测：LLM 声称操作成功但从未执行创建类操作
+                    if (lastReply == null && isHallucinatedSuccess(content, hasCreateAction[0])) {
+                        log.warn("检测到 LLM 幻觉：声称成功但未调用创建工具，hasCreateAction={}", hasCreateAction[0]);
+                        messages.add(Map.of("role", "user", "content",
+                                "你没有调用工具就声称操作成功了，这是错误的！你必须先调用工具（如 remind 的 create 操作）来实际完成用户的请求，然后再回复。"));
+                        lastReply = content; // 防止无限重试
+                        continue;
                     }
-                    return content.isEmpty() ? "抱歉，我没有生成有效回复，请稍后再试。" : content;
+                    return content;
                 }
 
-                // 3. 达到最大轮数 → 终止循环
-                if (toolRound == MAX_TOOL_ROUNDS) {
+                if (round == MAX_TOOL_ROUNDS) {
                     return "抱歉，工具调用次数过多，请换一种方式提问。";
                 }
 
-                // 4. 将助手的工具调用消息加入消息列表
-                messages.add(toAssistantToolCallMessage(assistant));
+                // 将助手的工具调用消息加入历史
+                messages.add(toAssistantMessage(assistant));
 
-                // 5. 逐个执行工具并将结果回传
-                for (JsonNode toolCall : toolCalls) {
-                    String toolCallId = toolCall.path("id").asText("");
-                    if (toolCallId.isBlank()) {
-                        throw new IllegalStateException("工具调用缺少 id");
+                // 逐个执行工具
+                for (JsonNode tc : toolCalls) {
+                    String toolCallId = tc.path("id").asText("");
+                    String functionName = tc.path("function").path("name").asText("");
+                    String arguments = tc.path("function").path("arguments").asText("{}");
+
+                    // 检测是否执行了创建类操作
+                    if (isCreateAction(functionName, arguments)) {
+                        hasCreateAction[0] = true;
                     }
 
-                    JsonNode function = toolCall.path("function");
-                    String functionName = function.path("name").asText("");
-                    String arguments = function.path("arguments").asText("{}");
-
-                    log.info("┌─ [{}] 决定调用工具: {}(参数: {})", model, functionName, arguments);
-                    String toolResult = executeTool(functionName, arguments);
-                    log.info("└─ 工具 [{}] 执行结果: {}", functionName,
-                            toolResult.length() > 200 ? toolResult.substring(0, 200) + "..." : toolResult);
+                    log.info("┌─ 调用工具: {}(参数: {})", functionName, arguments);
+                    String result = executeTool(functionName, arguments);
+                    log.info("└─ 工具结果: {}", result.length() > 200 ? result.substring(0, 200) + "..." : result);
 
                     messages.add(Map.of(
-                            "role", "tool",
-                            "tool_call_id", toolCallId,
-                            "content", toolResult
+                            "role", "tool", "tool_call_id", toolCallId, "content", result
                     ));
                 }
+                requestBody.put("messages", messages);
             }
             return "抱歉，我暂时无法处理，请稍后再试。";
         } catch (Exception e) {
@@ -303,239 +219,125 @@ public class LlmService {
     }
 
     /**
-     * 根据 LLM 返回的工具名称路由到对应的 Tool 组件执行。
-     *
-     * <p>使用显式的 if-else 链而非反射/Map 路由，原因是：
-     * 工具数量固定（8 个），if-else 链代码清晰、IDE 可追踪引用、
-     * 无需额外的注册机制。如需新增工具，在此方法中添加一个 if 分支即可。</p>
-     *
-     * <p>每个 Tool 各自负责参数校验和异常处理，返回结果可以是
-     * 纯文本（如天气描述）或 JSON 字符串（如地理编码坐标）。</p>
-     *
-     * @param functionName LLM 返回的工具名称（如 "get_weather"、"geocode"）
-     * @param arguments    工具参数 JSON 字符串（如 {@code {"city":"北京"}}）
-     * @return 工具执行结果字符串，找不到工具时返回错误说明
+     * 判断工具调用是否为创建/执行类操作（非查询类）。
      */
-    private String executeTool(String functionName, String arguments) {
-        if (weatherTool.getToolName().equals(functionName)) {
-            return weatherTool.execute(functionName, arguments);
+    private boolean isCreateAction(String functionName, String arguments) {
+        try {
+            JsonNode args = objectMapper.readTree(arguments);
+            String action = args.path("action").asText("");
+            return "create".equals(action) || "add".equals(action);
+        } catch (Exception e) {
+            return false;
         }
-        if (geocodeTool.getToolName().equals(functionName)) {
-            return geocodeTool.execute(functionName, arguments);
-        }
-        if (searchNearbyTool.getToolName().equals(functionName)) {
-            return searchNearbyTool.execute(functionName, arguments);
-        }
-        if (planRouteTool.getToolName().equals(functionName)) {
-            return planRouteTool.execute(functionName, arguments);
-        }
-        if (textToSpeechTool.getToolName().equals(functionName)) {
-            return textToSpeechTool.execute(functionName, arguments);
-        }
-        if (tarotTool.getToolName().equals(functionName)) {
-            return tarotTool.execute(functionName, arguments);
-        }
-        if (calendarTool.getToolName().equals(functionName)) {
-            return calendarTool.execute(functionName, arguments);
-        }
-        return "工具调用失败：未找到工具 " + functionName;
     }
 
     /**
-     * 将 DeepSeek API 返回的助手消息 JSON 节点转换为标准消息 Map。
+     * 检测 LLM 是否在未执行创建操作的情况下编造了成功结果。
      *
-     * <p>返回格式符合 OpenAI Chat Completion API 规范：
-     * {@code {role: "assistant", content: "..." | null, tool_calls: [...]}}</p>
-     *
-     * <p><b>DeepSeek 思考模式（Reasoning Mode）兼容性</b>：</p>
-     * <p>DeepSeek R1 等推理模型在调用工具时，消息中包含 {@code reasoning_content}
-     * （模型的内部推理过程）。后续请求<b>必须</b>原样带回此字段，
-     * 否则 API 会返回以下错误：</p>
-     * <pre>400 - "When using the deepseek-reasoner model, tool call messages
-     * must retain the reasoning_content field"</pre>
-     *
-     * @param assistant DeepSeek API 响应中 {@code choices[0].message} 的 Jackson JsonNode
-     * @return 标准格式的助手消息 Map（role、content、tool_calls，可选 reasoning_content）
+     * <p>特征：回复包含成功标记（✅、设置成功、已创建等），
+     * 但整个对话过程中没有执行过任何 create 类操作。</p>
      */
-    private Map<String, Object> toAssistantToolCallMessage(JsonNode assistant) {
-        Map<String, Object> message = new LinkedHashMap<>();
-        message.put("role", "assistant");
-        message.put("content", assistant.path("content").isNull()
-                ? null : assistant.path("content").asText());
-        message.put("tool_calls", objectMapper.convertValue(assistant.path("tool_calls"), List.class));
+    private boolean isHallucinatedSuccess(String reply, boolean hasCreateAction) {
+        if (reply == null || hasCreateAction) return false;
+        return reply.contains("✅") || reply.contains("设置成功")
+                || reply.contains("已创建") || reply.contains("已帮你创建")
+                || reply.contains("已设置") || reply.contains("提醒ID");
+    }
 
-        // DeepSeek R1 推理模型要求保留 reasoning_content，否则后续请求报 400
-        if (assistant.hasNonNull("reasoning_content")) {
-            message.put("reasoning_content", assistant.get("reasoning_content").asText());
+    private JsonNode callChatCompletion(Map<String, Object> requestBody) throws Exception {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(apiKey);
+
+        String requestJson = objectMapper.writeValueAsString(requestBody);
+        log.info("→ 调用 LLM: model={}", requestBody.get("model"));
+        ResponseEntity<String> response = restTemplate.postForEntity(
+                baseUrl + "/v1/chat/completions", new HttpEntity<>(requestJson, headers), String.class);
+
+        JsonNode root = objectMapper.readTree(response.getBody());
+        if (root.has("error")) throw new IllegalStateException("LLM API 错误: " + root.get("error"));
+
+        JsonNode choices = root.path("choices");
+        JsonNode message = choices.get(0).path("message");
+
+        if (message.has("tool_calls") && message.path("tool_calls").isArray()) {
+            log.info("← LLM 响应: 调用 {} 个工具", message.path("tool_calls").size());
+        } else {
+            log.info("← LLM 响应: 直接回复");
         }
         return message;
     }
 
-    /**
-     * 调用 LLM Chat Completion API — 底层 HTTP 通信。
-     *
-     * <p>发送 POST 请求到 {@code {baseUrl}/v1/chat/completions}，使用 Bearer Token 认证。
-     * 请求体和响应体均通过 Jackson 处理。</p>
-     *
-     * <h3>响应校验链</h3>
-     * <ol>
-     *   <li>响应体不为 {@code null}</li>
-     *   <li>不存在 {@code error} 字段（如 API key 无效、模型不存在等）</li>
-     *   <li>{@code choices} 数组非空且包含 {@code message} 节点</li>
-     * </ol>
-     *
-     * <p>此方法不捕获异常 — 由上层（{@link #callLlmWithTools} 或 {@link #callLlm}）处理。</p>
-     *
-     * @param apiUrl      API 基础地址（如 {@code https://api.deepseek.com}）
-     * @param key         API 密钥，作为 Bearer Token 发送
-     * @param requestBody 完整的请求体 Map（model、messages、tools、temperature 等），由 Jackson 序列化
-     * @return 响应中 {@code choices[0].message} 节点（包含 role、content、可能包含 tool_calls）
-     * @throws Exception 请求失败、响应校验不通过或 JSON 解析异常时抛出
-     */
-    private JsonNode callChatCompletion(String apiUrl, String key,
-                                        Map<String, Object> requestBody) throws Exception {
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.setBearerAuth(key);
-
-        String requestJson = objectMapper.writeValueAsString(requestBody);
-        log.info("→ 调用 LLM: model={}, endpoint={}/v1/chat/completions", requestBody.get("model"), apiUrl);
-        HttpEntity<String> entity = new HttpEntity<>(requestJson, headers);
-        ResponseEntity<String> response = restTemplate.postForEntity(
-                apiUrl + "/v1/chat/completions", entity, String.class);
-
-        String responseBody = response.getBody();
-        if (responseBody == null) {
-            throw new IllegalStateException("LLM 返回空响应");
+    private Map<String, Object> toAssistantMessage(JsonNode assistant) {
+        Map<String, Object> msg = new LinkedHashMap<>();
+        msg.put("role", "assistant");
+        msg.put("content", assistant.path("content").isNull() ? null : assistant.path("content").asText());
+        msg.put("tool_calls", objectMapper.convertValue(assistant.path("tool_calls"), List.class));
+        if (assistant.hasNonNull("reasoning_content")) {
+            msg.put("reasoning_content", assistant.get("reasoning_content").asText());
         }
+        return msg;
+    }
 
-        JsonNode root = objectMapper.readTree(responseBody);
-        if (root.has("error")) {
-            throw new IllegalStateException("LLM API 错误: " + root.get("error"));
-        }
-
-        JsonNode choices = root.path("choices");
-        if (!choices.isArray() || choices.isEmpty()
-                || choices.get(0).path("message").isMissingNode()) {
-            throw new IllegalStateException("LLM 响应缺少 choices[0].message");
-        }
-
-        // 打印 LLM 响应摘要
-        JsonNode message = choices.get(0).path("message");
-        String finishReason = choices.get(0).path("finish_reason").asText("");
-        if (message.has("tool_calls") && message.path("tool_calls").isArray()) {
-            int toolCount = message.path("tool_calls").size();
-            StringBuilder toolNames = new StringBuilder();
-            for (JsonNode tc : message.path("tool_calls")) {
-                if (toolNames.length() > 0) toolNames.append(", ");
-                toolNames.append(tc.path("function").path("name").asText(""));
-            }
-            log.info("← LLM 响应: 决定调用 {} 个工具 [{}] (finish_reason={})",
-                    toolCount, toolNames, finishReason);
-        } else {
-            String contentPreview = message.path("content").asText("");
-            log.info("← LLM 响应: 直接回复 (finish_reason={}), 内容: {}",
-                    finishReason,
-                    contentPreview.length() > 100 ? contentPreview.substring(0, 100) + "..." : contentPreview);
-        }
-        return choices.get(0).path("message");
+    private String executeTool(String functionName, String arguments) {
+        if (weatherTool.getToolName().equals(functionName)) return weatherTool.execute(functionName, arguments);
+        if (dateTimeTool.getToolName().equals(functionName)) return dateTimeTool.execute(functionName, arguments);
+        if (textToSpeechTool.getToolName().equals(functionName)) return textToSpeechTool.execute(functionName, arguments);
+        if (geocodeTool.getToolName().equals(functionName)) return geocodeTool.execute(functionName, arguments);
+        if (searchNearbyTool.getToolName().equals(functionName)) return searchNearbyTool.execute(functionName, arguments);
+        if (planRouteTool.getToolName().equals(functionName)) return planRouteTool.execute(functionName, arguments);
+        if (tarotTool.getToolName().equals(functionName)) return tarotTool.execute(functionName, arguments);
+        if (remindTool.getToolName().equals(functionName)) return remindTool.execute(functionName, arguments);
+        if (scheduledTaskTool.getToolName().equals(functionName)) return scheduledTaskTool.execute(functionName, arguments);
+        if (imageGenerationTool.getToolName().equals(functionName)) return imageGenerationTool.execute(functionName, arguments);
+        return "工具调用失败：未找到工具 " + functionName;
     }
 
     /**
-     * 图片识别对话（多模态 Vision API）。
-     *
-     * <p>将微信图片转为 Base64 Data URL（{@code data:image/{mime};base64,...}），
-     * 与文本提示词一起发送至多模态 Vision API 进行分析。</p>
-     *
-     * <h3>消息格式</h3>
-     * <p>图片识别使用 OpenAI Vision API 兼容的 Content Array 格式：</p>
-     * <pre>{@code
-     * "content": [
-     *   {"type": "text", "text": "请详细描述..."},
-     *   {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
-     * ]
-     * }</pre>
-     *
-     * <h3>对话历史集成</h3>
-     * <p>识别结果会追加到用户对话历史（图片消息占位为 {@code [发送了一张图片]}），
-     * 使后续文本对话可以引用之前的图片内容（"刚才那张图里的..."）。</p>
-     *
-     * @param userId     用户唯一标识
-     * @param imageBytes 图片原始字节（由 WeChatBotService 从微信下载）
-     * @param fileName   文件名，用于推断 MIME 类型（如 "photo.jpg" → image/jpeg）
-     * @return 图片内容的中文描述文本，或错误提示
+     * 图片识别对话 — 使用 RestTemplate 调用 Vision API。
      */
     public String chatWithImage(String userId, byte[] imageBytes, String fileName) {
-        // 构建 Base64 Data URL
+        log.info("========== 图片识别开始 ==========");
         String base64 = Base64.getEncoder().encodeToString(imageBytes);
         String mimeType = getMimeType(fileName);
         String dataUrl = "data:" + mimeType + ";base64," + base64;
 
-        // 构建多模态消息：文本提示 + 图片 Data URL
         List<Map<String, Object>> contentParts = new ArrayList<>();
-        contentParts.add(Map.of("type", "text", "text",
-                "请详细描述这张图片的内容。用友好、简洁的中文回复，控制在200字以内。"));
-        contentParts.add(Map.of(
-                "type", "image_url",
-                "image_url", Map.of("url", dataUrl)
-        ));
+        contentParts.add(Map.of("type", "text", "text", "请详细描述这张图片的内容。用友好、简洁的中文回复，控制在200字以内。"));
+        contentParts.add(Map.of("type", "image_url", "image_url", Map.of("url", dataUrl)));
 
-        // 组装完整消息列表（含当前日期）
         String today = java.time.LocalDate.now().toString();
-        String systemContent = SYSTEM_PROMPT + "\n当前日期：" + today + "，请基于此日期回答用户关于时间、日期的问题。";
         List<Map<String, Object>> messages = new ArrayList<>();
-        messages.add(Map.of("role", "system", "content", systemContent));
-
-        LinkedList<Map<String, Object>> history = conversations.get(userId);
-        if (history != null) {
-            synchronized (history) {
-                messages.addAll(history);
-            }
-        }
+        messages.add(Map.of("role", "system", "content", SYSTEM_PROMPT + "\n当前日期：" + today));
         messages.add(Map.of("role", "user", "content", contentParts));
 
-        // Vision API 不需要工具调用
-        Map<String, Object> requestBody = Map.of(
-                "model", visionModel,
-                "messages", messages,
-                "max_tokens", 1024
-        );
+        Map<String, Object> requestBody = Map.of("model", visionModel, "messages", messages, "max_tokens", 1024);
 
         String reply = callLlm(visionBaseUrl, visionApiKey, requestBody);
 
-        // 更新对话历史
-        LinkedList<Map<String, Object>> h = conversations.computeIfAbsent(userId, k -> new LinkedList<>());
-        synchronized (h) {
-            h.add(Map.of("role", "user", "content", "[发送了一张图片]"));
-            h.add(Map.of("role", "assistant", "content", reply));
-            while (h.size() > MAX_HISTORY) {
-                h.removeFirst();
-            }
-        }
+        chatMemory.add(userId, List.of(
+                new UserMessage("[发送了一张图片]"),
+                new AssistantMessage(reply)
+        ));
 
-        return reply;
+        log.info("---------- 图片识别结果 ----------");
+        log.info("回复内容: {}", reply.trim());
+        log.info("========== 图片识别结束 ==========");
+        return reply.trim();
     }
 
-    /**
-     * 简化的 LLM 调用 — 无工具注册、无对话历史管理。
-     *
-     * <p>对应不需要 Function Calling 的场景（如图片识别、文档摘要），
-     * 直接调用 {@link #callChatCompletion} 然后提取 {@code content} 字段。</p>
-     *
-     * <p>与 {@link #chat} 的区别：不注册 tools、不传 tool_choice、
-     * 不处理 tool_calls、不管理对话历史。</p>
-     *
-     * @param apiUrl      API 基础地址
-     * @param key         API 密钥
-     * @param requestBody 请求体 Map（已包含 model 和 messages）
-     * @return 模型回复的文本内容，异常时返回友好错误提示
-     */
     private String callLlm(String apiUrl, String key, Map<String, Object> requestBody) {
         try {
-            JsonNode message = callChatCompletion(apiUrl, key, requestBody);
-            String content = message.path("content").asText("").trim();
-            log.info("LLM 回复: {}", content);
-            return content.isEmpty() ? "抱歉，我暂时无法处理，请稍后再试。" : content;
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.setBearerAuth(key);
+            String json = objectMapper.writeValueAsString(requestBody);
+            ResponseEntity<String> response = restTemplate.postForEntity(
+                    apiUrl + "/v1/chat/completions", new HttpEntity<>(json, headers), String.class);
+            JsonNode root = objectMapper.readTree(response.getBody());
+            if (root.has("error")) throw new IllegalStateException("API 错误: " + root.get("error"));
+            String content = root.path("choices").get(0).path("message").path("content").asText("").trim();
+            return content.isEmpty() ? "抱歉，AI 服务暂时不可用。" : content;
         } catch (Exception e) {
             log.error("LLM 调用失败: {}", e.getMessage());
             return "抱歉，AI 服务暂时不可用。";
@@ -543,23 +345,36 @@ public class LlmService {
     }
 
     /**
-     * 根据文件扩展名推断图片 MIME 类型，用于构建 Data URL。
+     * 去除 LLM 回复中重复的内容。
      *
-     * <p>支持的图片格式及对应 MIME 类型：</p>
-     * <ul>
-     *   <li>{@code .jpg / .jpeg} → {@code image/jpeg}</li>
-     *   <li>{@code .png} → {@code image/png}</li>
-     *   <li>{@code .gif} → {@code image/gif}</li>
-     *   <li>{@code .webp} → {@code image/webp}</li>
-     *   <li>{@code .bmp} → {@code image/bmp}</li>
-     * </ul>
-     *
-     * <p>无法识别的扩展名或文件名为 {@code null} 时，默认返回 {@code image/png}
-     * （最通用的无损图片格式，兼容性最好）。</p>
-     *
-     * @param fileName 文件名，可能为 {@code null}
-     * @return MIME 类型字符串（如 {@code "image/jpeg"}）
+     * <p>LLM 有时会将整段回复重复生成两遍（内容完全相同）。
+     * 使用滑动窗口找到重复起点，若重复部分占总内容 40% 以上则去重。</p>
      */
+    private String deduplicateReply(String reply) {
+        if (reply == null || reply.isEmpty()) return reply;
+        String[] lines = reply.split("\\n", -1);
+        int total = lines.length;
+        if (total < 4) return reply;
+
+        // 从中点附近开始，寻找重复起点
+        int searchEnd = Math.min(total - 1, total / 2 + 2);
+        for (int split = total / 2; split <= searchEnd; split++) {
+            int remaining = total - split;
+            boolean match = true;
+            // 比较 lines[0..remaining-1] 和 lines[split..split+remaining-1]
+            for (int i = 0; i < remaining; i++) {
+                if (!lines[i].equals(lines[split + i])) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match && remaining * 10 / total >= 4) {
+                return String.join("\n", Arrays.copyOfRange(lines, 0, split)).trim();
+            }
+        }
+        return reply;
+    }
+
     private String getMimeType(String fileName) {
         if (fileName == null) return "image/png";
         String lower = fileName.toLowerCase();

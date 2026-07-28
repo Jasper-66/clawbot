@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
@@ -147,6 +149,25 @@ public class TarotTool {
      */
     public String getToolName() {
         return NAME;
+    }
+
+    @Tool(name = "tarot_reading", description = "塔罗牌占卜工具。action: start(开始新占卜)/spread(选择牌阵)/cards(选牌)/continue(继续)")
+    public String tarotReading(
+            @ToolParam(required = true, description = "操作类型：start/spread/cards/continue") String action,
+            @ToolParam(required = true, description = "用户ID") String userId,
+            @ToolParam(required = false, description = "用户问题（start时必填）") String question,
+            @ToolParam(required = false, description = "牌阵类型（spread时必填）：单牌/三牌/爱情三角/二选一/凯尔特十字") String spreadType,
+            @ToolParam(required = false, description = "选择的牌码（cards时必填，逗号分隔）") String selectedCodes) {
+        try {
+            StringBuilder json = new StringBuilder("{\"action\":\"" + action + "\",\"user_id\":\"" + userId + "\"");
+            if (question != null && !question.isEmpty()) json.append(",\"user_question\":\"").append(question).append("\"");
+            if (spreadType != null && !spreadType.isEmpty()) json.append(",\"spread_type\":\"").append(spreadType).append("\"");
+            if (selectedCodes != null && !selectedCodes.isEmpty()) json.append(",\"selected_codes\":\"").append(selectedCodes).append("\"");
+            json.append("}");
+            return execute(NAME, json.toString());
+        } catch (Exception e) {
+            return "塔罗占卜失败: " + e.getMessage();
+        }
     }
 
     /**

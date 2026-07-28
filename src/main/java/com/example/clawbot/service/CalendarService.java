@@ -31,7 +31,7 @@ import org.springframework.web.client.RestTemplate;
  *   <li>Timor.tech 放假安排：{@code https://timor.tech/api/holiday/year/{year}}（免费）</li>
  * </ul>
  *
- * @see com.example.clawbot.tool.CalendarTool
+ * @see com.example.clawbot.tool.DateTimeTool
  */
 @Slf4j
 @Service

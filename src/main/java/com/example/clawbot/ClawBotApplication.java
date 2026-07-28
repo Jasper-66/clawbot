@@ -2,6 +2,7 @@ package com.example.clawbot;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * ClawBot 微信机器人应用入口。
@@ -26,11 +27,11 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * @see com.example.clawbot.service.SpeechService
  */
 @SpringBootApplication
+@EnableScheduling
 public class ClawBotApplication {
 
     /**
      * 应用主入口方法。
-     *
      * <p>调用 {@link SpringApplication#run(Class, String...)} 启动嵌入式 Tomcat 服务器，
      * 加载 ApplicationContext 并触发所有 {@code @Bean} 初始化和
      * {@link jakarta.annotation.PostConstruct @PostConstruct} 回调。</p>
