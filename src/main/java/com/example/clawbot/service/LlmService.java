@@ -184,7 +184,7 @@ public class LlmService {
             String lastReply = null;
 
             for (int round = 0; round <= MAX_TOOL_ROUNDS; round++) {
-                JsonNode assistant = callChatCompletion(apiKey, baseUrl, requestBody);
+                JsonNode assistant = callChatCompletion(baseUrl, apiKey, requestBody);
                 JsonNode toolCalls = assistant.path("tool_calls");
 
                 // 无工具调用 → 检查是否幻觉后返回
