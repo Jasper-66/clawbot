@@ -9,7 +9,7 @@ import org.springframework.stereotype.Component;
 
 @Slf4j
 // 应用启动时自动创建 SQLite 数据库表结构
-@Component
+@Component    //告诉Spring 这是一个组件
 @RequiredArgsConstructor
 public class DatabaseInitializer {
 

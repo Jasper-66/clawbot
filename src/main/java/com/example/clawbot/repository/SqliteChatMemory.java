@@ -24,7 +24,7 @@ import java.util.Map;
 @Component
 @RequiredArgsConstructor
 public class SqliteChatMemory implements ChatMemory {
-
+    // ↑ 关键：implements ChatMemory = 我承诺遵守这个接口的规范
     private final JdbcTemplate jdbcTemplate;
     private final ConversationRepository conversationRepository;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -34,6 +34,7 @@ public class SqliteChatMemory implements ChatMemory {
     public void add(String conversationId, List<Message> messages) {
         String now = OffsetDateTime.now(ZONE).toString();
         for (Message message : messages) {
+            // ① 把 metadata（Map）转成 JSON 字符串存进去
             String metadataJson = null;
             try {
                 if (message.getMetadata() != null && !message.getMetadata().isEmpty()) {
