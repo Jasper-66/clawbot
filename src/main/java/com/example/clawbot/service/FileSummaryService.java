@@ -1,7 +1,5 @@
 package com.example.clawbot.service;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pdfbox.Loader;
@@ -11,33 +9,26 @@ import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.poi.xslf.usermodel.XMLSlideShow;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.SystemMessage;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpEntity;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
 
 import java.io.ByteArrayInputStream;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
-/** 文件总结服务，使用 Apache PDFBox/POI 提取文档文本并通过 LLM 生成摘要。 */
+/** 文件总结服务，使用 Apache PDFBox/POI 提取文档文本并通过 Spring AI ChatModel 生成摘要。 */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class FileSummaryService {
 
-    private final RestTemplate restTemplate;
-    private final ObjectMapper objectMapper = new ObjectMapper();
-
-    @Value("${deepseek.api.key}")
-    private String apiKey;
-
-    @Value("${deepseek.api.base-url}")
-    private String baseUrl;
+    private final OpenAiChatModel deepSeekChatModel;
 
     @Value("${deepseek.api.model}")
     private String model;
@@ -180,46 +171,23 @@ public class FileSummaryService {
         }
     }
 
-    /** 调用 DeepSeek LLM 生成 200 字以内的中文文档摘要。 */
+    /** 调用 ChatModel 生成 200 字以内的中文文档摘要。 */
     private String callLlm(String content, String fileName) {
         try {
-            List<Map<String, Object>> messages = List.of(
-                    Map.of("role", "system", "content",
-                            "你是一个专业的文档分析助手。请根据用户提供的文件内容进行简洁总结，控制在200字以内，用中文回复。"),
-                    Map.of("role", "user", "content",
-                            "请总结以下文件「" + fileName + "」的内容：\n\n" + content)
+            List<Message> messages = List.of(
+                    new SystemMessage("你是一个专业的文档分析助手。请根据用户提供的文件内容进行简洁总结，控制在200字以内，用中文回复。"),
+                    new UserMessage("请总结以下文件「" + fileName + "」的内容：\n\n" + content)
             );
 
-            Map<String, Object> requestBody = new HashMap<>(Map.of(
-                    "model", model,
-                    "messages", messages,
-                    "temperature", 0.3,
-                    "max_tokens", 512
-            ));
+            Prompt prompt = new Prompt(messages, OpenAiChatOptions.builder()
+                    .model(model)
+                    .temperature(0.3)
+                    .maxTokens(512)
+                    .build());
 
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.setBearerAuth(apiKey);
-
-            String requestJson = objectMapper.writeValueAsString(requestBody);
-            HttpEntity<String> entity = new HttpEntity<>(requestJson, headers);
-            ResponseEntity<String> response = restTemplate.postForEntity(
-                    baseUrl + "/v1/chat/completions", entity, String.class);
-
-            String responseBody = response.getBody();
-            if (responseBody == null) {
-                return "抱歉，AI 服务返回为空，请稍后再试。";
-            }
-
-            JsonNode root = objectMapper.readTree(responseBody);
-            if (root.has("error")) {
-                log.error("DeepSeek API 错误: {}", root.get("error"));
-                return "抱歉，文档分析服务暂时不可用。";
-            }
-
-            String reply = root.get("choices").get(0).get("message").get("content").asText();
-            return reply != null ? reply.trim() : "未能生成总结。";
-
+            ChatResponse response = deepSeekChatModel.call(prompt);
+            String reply = response.getResult().getOutput().getText();
+            return (reply != null && !reply.isBlank()) ? reply.trim() : "未能生成总结。";
         } catch (Exception e) {
             log.error("文件总结 LLM 调用失败", e);
             return "抱歉，文档分析失败，请稍后再试。";

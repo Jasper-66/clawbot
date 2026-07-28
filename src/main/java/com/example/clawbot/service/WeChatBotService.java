@@ -7,6 +7,7 @@ import com.github.wechat.ilink.sdk.core.model.MessageItem;
 import com.github.wechat.ilink.sdk.core.model.WeixinMessage;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -16,6 +17,7 @@ import java.util.concurrent.CompletableFuture;
 /** 微信机器人核心服务，负责登录、消息轮询、消息路由和回复发送。 */
 @Slf4j
 @Service
+@RequiredArgsConstructor
 public class WeChatBotService {
 
     /** 匹配 LLM 回复中的 [audio:文件路径] 语音标记 */
@@ -30,16 +32,6 @@ public class WeChatBotService {
     private ILinkClient client;
 
     private volatile boolean running = true;
-
-    public WeChatBotService(LlmService llmService, ImageGenerationService imageGenerationService,
-                            SpeechService speechService, FileSummaryService fileSummaryService,
-                            ConversationMemoryService memoryService) {
-        this.llmService = llmService;
-        this.imageGenerationService = imageGenerationService;
-        this.speechService = speechService;
-        this.fileSummaryService = fileSummaryService;
-        this.memoryService = memoryService;
-    }
 
     /** 应用启动后异步初始化微信机器人，避免阻塞 Spring 启动。 */
     @PostConstruct
@@ -175,6 +167,8 @@ public class WeChatBotService {
         java.util.regex.Matcher matcher = AUDIO_MARKER_PATTERN.matcher(reply);
         if (matcher.find()) {
             String audioPath = matcher.group(1);
+            log.info("检测到音频标记: path={}, reply前100字={}", audioPath,
+                    reply.length() > 100 ? reply.substring(0, 100) : reply);
             java.io.File audioFile = new java.io.File(audioPath);
             if (audioFile.exists() && audioFile.isFile()) {
                 try {
@@ -206,6 +200,8 @@ public class WeChatBotService {
             return;
         }
         // 无音频标记 → 作为普通文本发送
+        log.info("无音频标记，文本回复: reply前100字={}",
+                reply.length() > 100 ? reply.substring(0, 100) : reply);
         sendReply(fromUser, reply);
     }
 
@@ -347,7 +343,7 @@ public class WeChatBotService {
         // 自然语言音色请求：必须同时包含"声音关键词"和"动作关键词"
         String[] voiceKeys = {"声音", "语音", "音色", "声线", "嗓音"};
         String[] actionKeys = {"切换", "换", "设置", "改", "想要", "换一个", "换个",
-                "变成", "改成", "有没有", "给我", "换个"};
+                "变成", "改成", "有没有", "换个"};
 
         boolean hasVoice = false;
         for (String kw : voiceKeys) {

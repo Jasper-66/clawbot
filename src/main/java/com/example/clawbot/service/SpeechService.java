@@ -2,6 +2,7 @@ package com.example.clawbot.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
@@ -20,16 +21,12 @@ import java.util.Map;
 /** TTS（文字转语音）和 ASR（语音转文字）服务，通过阿里云 DashScope API 实现，支持 15 种音色切换和微信音频格式转码。 */
 @Slf4j
 @Service
+@RequiredArgsConstructor
 public class SpeechService {
 
     private final RestTemplate restTemplate;
     private final ConversationMemoryService memoryService;
     private final ObjectMapper objectMapper = new ObjectMapper();
-
-    public SpeechService(RestTemplate restTemplate, ConversationMemoryService memoryService) {
-        this.restTemplate = restTemplate;
-        this.memoryService = memoryService;
-    }
 
     @Value("${vision.api.key}")
     private String apiKey;
@@ -295,7 +292,7 @@ public class SpeechService {
 
         // ── fmt sub-chunk ──
         wav[12] = 'f'; wav[13] = 'm'; wav[14] = 't'; wav[15] = ' ';
-        intLE(wav, 16, 16);             // fmt 块大小 (PCM = 16)
+        intLE(wav, 16, 16);        // fmt 块大小 (PCM = 16)
         shortLE(wav, 20, (short) 1);    // 音频格式 (1 = PCM)
         shortLE(wav, 22, (short) 1);    // 声道数 (1 = Mono)
         intLE(wav, 24, sampleRate);     // 采样率
