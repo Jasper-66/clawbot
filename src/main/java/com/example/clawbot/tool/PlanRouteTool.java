@@ -13,75 +13,30 @@ import org.springframework.web.util.UriComponentsBuilder;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * 路线规划工具 — 驾车路线计算与导航步骤。
- *
- * <p>作为 LLM Function Calling 的工具之一，注册为 {@code plan_route}。
- * 调用<a href="https://lbs.amap.com/api/webservice/guide/api/direction/">高德地图路径规划 API</a>。</p>
- *
- * <h3>终点确定策略</h3>
- * <p>支持两种方式确定终点：</p>
- * <ol>
- *   <li><b>直接指定</b> — 用户提供明确的终点经纬度（destination 参数）</li>
- *   <li><b>周边搜索</b> — 用户提供关键词（如 "火锅"、"咖啡"），
- *       调用高德周边搜索 API 自动找到起点附近最近的匹配 POI 作为终点</li>
- * </ol>
- *
- * <h3>典型调用链</h3>
- * <pre>
- * 用户："从我当前位置开车到最近的海底捞怎么走？"
- *   → LLM 调用 geocode("当前位置") → 获取起点坐标
- *   → LLM 调用 plan_route(location="116.473,39.993", keywords="海底捞")
- *   → 自动搜索最近海底捞 → 规划驾车路线 → 返回距离、时长、步骤
- * </pre>
- *
- * <h3>返回数据</h3>
- * <p>返回 JSON 包含：总距离（米）、预计时间（秒）、分步导航指引数组。</p>
- *
- * @see com.example.clawbot.tool.GeocodeTool
- * @see com.example.clawbot.tool.SearchNearbyTool
- * @see com.example.clawbot.service.LlmService
- */
+// 路线规划工具：LLM 可调用规划两点间的出行路线和距离耗时（高德地图 API）
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class PlanRouteTool {
 
-    /** HTTP 客户端 */
     private final RestTemplate restTemplate;
-
-    /** Jackson JSON 解析器 */
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    /** 高德地图 Web API 密钥 */
     @Value("${amap.api.key}")
     private String amapApiKey;
 
-    /** 工具名称 */
     private static final String NAME = "plan_route";
-
-    /**
-     * 工具描述。
-     *
-     * <p>提示 LLM：起点由 location 参数指定（经纬度格式），
-     * 若用户只提供地址则应先调用 geocode 工具转换。</p>
-     */
-    private static final String DESCRIPTION = "规划从起点到终点的路线。起点由 location 参数指定（经纬度格式），终点通过 keywords 或 types 搜索周边 POI 确定。若用户只提供地址，应先调用 geocode 工具转换为经纬度。";
-
-    /** 高德驾车路径规划 API 端点 */
-    private static final String AMAP_DIRECTION_URL = "https://restapi.amap.com/v3/direction/driving";
-
-    /** 高德周边搜索 API 端点（用于自动发现终点） */
-    private static final String AMAP_PLACE_AROUND_URL = "https://restapi.amap.com/v3/place/around";
-
-    /** 默认搜索半径（米），终点关键词搜索时使用 */
+    private static final String DESCRIPTION = "规划从起点到终点的驾车路线。起点由 location 参数指定（经纬度格式），终点通过 keywords 或 types 搜索周边 POI 确定或直接指定 destination。若用户只提供地址，应先调用 geocode 工具转换为经纬度。";
     private static final int DEFAULT_RADIUS = 3000;
-
     /** 最大搜索半径（米），防止无意义的大范围搜索 */
     private static final int MAX_RADIUS = 50000;
+    private static final String AMAP_DIRECTION_URL = "https://restapi.amap.com/v3/direction/driving";
+    private static final String AMAP_PLACE_AROUND_URL = "https://restapi.amap.com/v3/place/around";
 
     /**
      * 获取工具名称。
@@ -92,48 +47,66 @@ public class PlanRouteTool {
         return NAME;
     }
 
-    @Tool(name = "plan_route", description = "规划从起点到终点的驾车路线。起点由 location 参数指定（经纬度格式），终点通过 keywords 搜索周边 POI 确定或直接指定 destination。")
+    @Tool(name = "plan_route", description = "规划从起点到终点的驾车路线。起点由 location 参数指定（经纬度格式），终点通过 keywords 或 types 搜索周边 POI 确定或直接指定 destination。若用户只提供地址，应先调用 geocode 工具转换为经纬度。")
     public String planRoute(
-            @ToolParam(required = true, description = "起点坐标，格式：经度,纬度") String location,
-            @ToolParam(required = false, description = "终点坐标，格式：经度,纬度") String destination,
-            @ToolParam(required = false, description = "终点搜索关键词，如：海底捞、加油站") String keywords) {
+            @ToolParam(description = "起点经纬度，格式 经度,纬度（如 116.473168,39.993015）。若用户只提供地址，应先调用 geocode 工具转换为此格式。") String location,
+            @ToolParam(required = false, description = "终点关键词，用于搜索周边 POI，如 火锅、咖啡、游乐园") String keywords,
+            @ToolParam(required = false, description = "POI 类型编码，多个用英文逗号 , 分隔，如 050301,050302") String types,
+            @ToolParam(required = false, description = "搜索半径，单位米，最大 50000，默认 3000") Integer radius,
+            @ToolParam(required = false, description = "排序规则：distance=按距离排序（默认），weight=综合排序") String sortrule,
+            @ToolParam(required = false, description = "终点经纬度，格式 经度,纬度。若提供此参数，将直接规划路线，不再搜索周边 POI。") String destination) {
+
         if (location == null || location.trim().isEmpty()) {
             return "工具调用失败：location 参数不能为空";
         }
-        if (!location.trim().matches("^-?\\d+\\.\\d+,-?\\d+\\.\\d+$")) {
-            return "工具调用失败：location 格式不正确，应为 经度,纬度";
+        String origin = location.trim();
+        if (!origin.matches("^-?\\d+\\.\\d+,-?\\d+\\.\\d+$")) {
+            return "工具调用失败：location 格式不正确，应为 经度,纬度（如 116.473168,39.993015）";
         }
+
+        String effectiveDestination = destination != null ? destination.trim() : "";
+
         try {
-            String dest = destination;
-            if (dest == null || dest.trim().isEmpty()) {
-                if (keywords == null || keywords.trim().isEmpty()) {
-                    return "工具调用失败：keywords 或 destination 至少提供一个";
+            if (effectiveDestination.isEmpty()) {
+                String effectiveKeywords = keywords != null ? keywords.trim() : "";
+                String effectiveTypes = types != null ? types.trim() : "";
+
+                if (effectiveKeywords.isEmpty() && effectiveTypes.isEmpty()) {
+                    return "工具调用失败：keywords、types 或 destination 参数至少需要提供一个";
                 }
-                dest = searchDestination(location.trim(), keywords.trim(), "", DEFAULT_RADIUS, "distance");
-                if (dest == null) return "{\"error\":\"未找到匹配的终点地点\"}";
-            } else if (!dest.trim().matches("^-?\\d+\\.\\d+,-?\\d+\\.\\d+$")) {
-                return "工具调用失败：destination 格式不正确，应为 经度,纬度";
+
+                int effectiveRadius = DEFAULT_RADIUS;
+                if (radius != null) {
+                    effectiveRadius = radius;
+                    if (effectiveRadius < 1) effectiveRadius = 1;
+                    if (effectiveRadius > MAX_RADIUS) effectiveRadius = MAX_RADIUS;
+                }
+
+                String effectiveSortrule = (sortrule != null && sortrule.trim().equals("weight")) ? "weight" : "distance";
+
+                effectiveDestination = searchDestination(origin, effectiveKeywords, effectiveTypes, effectiveRadius, effectiveSortrule);
+                if (effectiveDestination == null) {
+                    return "{\"error\":\"未找到匹配的终点地点\"}";
+                }
+            } else {
+                if (!effectiveDestination.matches("^-?\\d+\\.\\d+,-?\\d+\\.\\d+$")) {
+                    return "工具调用失败：destination 格式不正确，应为 经度,纬度";
+                }
             }
-            log.info("执行路线规划: origin={}, destination={}", location, dest);
-            return planRoute(location.trim(), dest.trim());
+
+            log.info("[行动] LLM调用工具: plan_route(origin=\"{}\", destination=\"{}\") → 调用高德地图规划出行路线", origin, effectiveDestination);
+            String result = planRoute(origin, effectiveDestination);
+            log.info("[观察] 工具返回: plan_route → 路线规划完成");
+            return result;
         } catch (Exception e) {
-            log.error("路线规划工具执行失败: {}", e.getMessage());
-            return "工具调用失败：" + e.getMessage();
+            log.error("[观察] 调用失败 plan_route(): origin={}, destination={}, 原因: {}, 建议: 检查高德地图 API 密钥和参数格式",
+                    origin, effectiveDestination, e.getMessage(), e);
+            return "工具调用失败：路线规划异常: " + e.getMessage();
         }
     }
 
     /**
      * 获取工具定义（OpenAI Function Calling 格式）。
-     *
-     * <h3>参数说明</h3>
-     * <ul>
-     *   <li>{@code location}（必填）— 起点经纬度 "经度,纬度"</li>
-     *   <li>{@code destination}（可选）— 终点经纬度，提供则直接规划路线</li>
-     *   <li>{@code keywords}（可选）— 终点搜索关键词，如 "火锅"、"咖啡"</li>
-     *   <li>{@code types}（可选）— POI 类型编码，如 "050301"</li>
-     *   <li>{@code radius}（可选）— 搜索半径，默认 3000 米，最大 50000 米</li>
-     *   <li>{@code sortrule}（可选）— 排序规则：distance（距离优先）或 weight（综合评分优先）</li>
-     * </ul>
      *
      * @return Function Calling 格式的工具定义 Map
      */
@@ -181,17 +154,6 @@ public class PlanRouteTool {
     /**
      * 校验并执行模型返回的工具调用。
      *
-     * <p>核心逻辑：确定终点 → 调用高德驾车路线规划 API → 返回格式化结果。</p>
-     *
-     * <p>参数校验规则：</p>
-     * <ul>
-     *   <li>location 必填且格式为 "经度,纬度"</li>
-     *   <li>destination 可选，如果提供则格式必须为 "经度,纬度"</li>
-     *   <li>如果不提供 destination，则 keywords 或 types 至少提供一个</li>
-     *   <li>radius 范围为 1 ~ {@value #MAX_RADIUS} 米</li>
-     *   <li>sortrule 仅允许 "distance" 或 "weight"</li>
-     * </ul>
-     *
      * @param functionName  工具名称
      * @param argumentsJson LLM 生成的参数 JSON
      * @return 路线规划结果 JSON（包含 distance、duration、steps），或错误信息
@@ -200,103 +162,39 @@ public class PlanRouteTool {
         if (!NAME.equals(functionName)) {
             return "工具调用失败：不支持的工具 " + functionName;
         }
-
         try {
             JsonNode arguments = objectMapper.readTree(argumentsJson);
-
-            // 1. 校验起点
-            String origin = arguments.path("location").asText("").trim();
-            if (origin.isEmpty()) {
-                return "工具调用失败：location 参数不能为空";
-            }
-            if (!origin.matches("^-?\\d+\\.\\d+,-?\\d+\\.\\d+$")) {
-                return "工具调用失败：location 格式不正确，应为 经度,纬度（如 116.473168,39.993015）";
-            }
-
+            String location = arguments.path("location").asText("").trim();
+            String keywords = arguments.path("keywords").asText("").trim();
+            String types = arguments.path("types").asText("").trim();
+            int radius = arguments.path("radius").asInt(DEFAULT_RADIUS);
+            String sortrule = arguments.path("sortrule").asText("distance").trim();
             String destination = arguments.path("destination").asText("").trim();
-
-            // 2. 如果没有直接指定终点，通过周边搜索确定
-            if (destination.isEmpty()) {
-                String keywords = arguments.path("keywords").asText("").trim();
-                String types = arguments.path("types").asText("").trim();
-
-                if (keywords.isEmpty() && types.isEmpty()) {
-                    return "工具调用失败：keywords、types 或 destination 参数至少需要提供一个";
-                }
-
-                // 解析并钳制半径参数
-                int radius = DEFAULT_RADIUS;
-                if (arguments.has("radius") && !arguments.path("radius").isNull()) {
-                    radius = arguments.path("radius").asInt(DEFAULT_RADIUS);
-                    if (radius < 1) radius = 1;
-                    if (radius > MAX_RADIUS) radius = MAX_RADIUS;
-                }
-
-                // 解析并校验排序规则
-                String sortrule = arguments.path("sortrule").asText("distance").trim();
-                if (!"distance".equals(sortrule) && !"weight".equals(sortrule)) {
-                    sortrule = "distance";
-                }
-
-                destination = searchDestination(origin, keywords, types, radius, sortrule);
-                if (destination == null) {
-                    return "{\"error\":\"未找到匹配的终点地点\"}";
-                }
-            } else {
-                // 3. 校验直接指定的终点格式
-                if (!destination.matches("^-?\\d+\\.\\d+,-?\\d+\\.\\d+$")) {
-                    return "工具调用失败：destination 格式不正确，应为 经度,纬度";
-                }
-            }
-
-            log.info("执行路线规划: origin={}, destination={}", origin, destination);
-            return planRoute(origin, destination);
+            return planRoute(location, keywords, types, radius, sortrule, destination);
         } catch (Exception e) {
-            log.error("路线规划工具执行失败: {}", e.getMessage());
-            return "工具调用失败：arguments 不是有效的 JSON 或请求异常";
+            return "工具调用失败：arguments 不是有效的 JSON";
         }
     }
 
-    /**
-     * 搜索终点坐标 — 调用高德周边搜索 API 找到起点附近最近的 POI。
-     *
-     * <p>使用 {@code offset=1} 仅取最近的一个结果，返回其坐标。
-     * 如果 keywords 和 types 均提供，优先使用 keywords。</p>
-     *
-     * @param origin   起点经纬度
-     * @param keywords 搜索关键词
-     * @param types    POI 类型编码
-     * @param radius   搜索半径（米）
-     * @param sortrule 排序规则
-     * @return 最近 POI 的 "经度,纬度" 字符串，未找到返回 null
-     */
     private String searchDestination(String origin, String keywords, String types, int radius, String sortrule) {
         try {
-            URI uri = UriComponentsBuilder.fromUriString(AMAP_PLACE_AROUND_URL)
+            UriComponentsBuilder builder = UriComponentsBuilder.fromUriString(AMAP_PLACE_AROUND_URL)
                     .queryParam("key", amapApiKey)
                     .queryParam("location", origin)
                     .queryParam("radius", radius)
                     .queryParam("sortrule", sortrule)
-                    .queryParam("offset", 1)   // 只取最近的一个
+                    .queryParam("offset", 1)
                     .queryParam("page", 1)
                     .queryParam("extensions", "base")
-                    .encode(StandardCharsets.UTF_8)
-                    .build()
-                    .toUri();
+                    .encode(StandardCharsets.UTF_8);
 
-            // 追加搜索条件
             if (!keywords.isEmpty()) {
-                uri = UriComponentsBuilder.fromUri(uri)
-                        .queryParam("keywords", keywords)
-                        .build()
-                        .toUri();
+                builder.queryParam("keywords", keywords);
             } else if (!types.isEmpty()) {
-                uri = UriComponentsBuilder.fromUri(uri)
-                        .queryParam("types", types)
-                        .build()
-                        .toUri();
+                builder.queryParam("types", types);
             }
 
+            URI uri = builder.build().toUri();
             String response = restTemplate.getForObject(uri, String.class);
             JsonNode root = objectMapper.readTree(response);
 
@@ -311,38 +209,19 @@ public class PlanRouteTool {
 
             return pois.get(0).path("location").asText("");
         } catch (Exception e) {
-            log.error("搜索终点失败: {}", e.getMessage());
+            log.error("[观察] 调用失败 plan_route(搜索终点): origin={}, keywords={}, 原因: {}, 建议: 检查搜索参数或 API 密钥",
+                    origin, keywords, e.getMessage(), e);
             return null;
         }
     }
 
-    /**
-     * 调用高德驾车路径规划 API 并返回结构化路线信息。
-     *
-     * <p>请求 {@code extensions=all} 获取详细的步骤指引（分步导航），
-     * 而非仅总距离和总时间。</p>
-     *
-     * <h3>返回内容</h3>
-     * <p>JSON 包含三个顶层字段：</p>
-     * <ul>
-     *   <li>{@code distance} — 总距离（米）</li>
-     *   <li>{@code duration} — 预计耗时（秒）</li>
-     *   <li>{@code steps} — 分步导航数组，每步包含：
-     *     instruction（指引文字）、distance（该步距离）、
-     *     duration（该步耗时）、action（动作类型）</li>
-     * </ul>
-     *
-     * @param origin      起点经纬度
-     * @param destination 终点经纬度
-     * @return 路线规划结果 JSON 字符串
-     */
     private String planRoute(String origin, String destination) {
         try {
             URI uri = UriComponentsBuilder.fromUriString(AMAP_DIRECTION_URL)
                     .queryParam("key", amapApiKey)
                     .queryParam("origin", origin)
                     .queryParam("destination", destination)
-                    .queryParam("extensions", "all")  // 获取详细导航步骤
+                    .queryParam("extensions", "all")
                     .encode(StandardCharsets.UTF_8)
                     .build()
                     .toUri();
@@ -356,23 +235,20 @@ public class PlanRouteTool {
                 return String.format("{\"error\":\"路线规划失败：%s\"}", info);
             }
 
-            JsonNode route = root.path("route");
-            JsonNode paths = route.path("paths");
+            JsonNode paths = root.path("route").path("paths");
             if (!paths.isArray() || paths.isEmpty()) {
                 return "{\"error\":\"未找到可用路线\"}";
             }
 
-            // 取第一条推荐路线
             JsonNode path = paths.get(0);
             String distance = path.path("distance").asText("");
             String duration = path.path("duration").asText("");
 
-            // 提取分步导航指引
-            List<Map<String, Object>> steps = new java.util.ArrayList<>();
+            List<Map<String, Object>> steps = new ArrayList<>();
             JsonNode stepsNode = path.path("steps");
             if (stepsNode.isArray()) {
                 for (JsonNode step : stepsNode) {
-                    Map<String, Object> stepItem = new java.util.LinkedHashMap<>();
+                    Map<String, Object> stepItem = new LinkedHashMap<>();
                     stepItem.put("instruction", step.path("instruction").asText(""));
                     stepItem.put("distance", step.path("distance").asText(""));
                     stepItem.put("duration", step.path("duration").asText(""));
@@ -387,7 +263,8 @@ public class PlanRouteTool {
                     "steps", steps
             ));
         } catch (Exception e) {
-            log.error("路线规划请求失败: {}", e.getMessage());
+            log.error("[观察] 调用失败 plan_route(origin=\"{}\", destination=\"{}\"): {}, 建议: 检查网络连接",
+                    origin, destination, e.getMessage(), e);
             return "{\"error\":\"路线规划请求异常\"}";
         }
     }

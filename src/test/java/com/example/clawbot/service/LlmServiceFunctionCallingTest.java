@@ -39,17 +39,16 @@ class LlmServiceFunctionCallingTest {
 
     /** WeatherService mock — 避免真实 HTTP 调用心知天气 API */
     private final WeatherService weatherService = mock(WeatherService.class);
-
     /** WeatherTool 使用真实实例（但其依赖的 WeatherService 已 mock） */
     private final WeatherTool weatherTool = new WeatherTool(weatherService);
 
     /** 以下 Tool 均为 mock，本测试用例不涉及它们的功能 */
+    private final DateTimeTool dateTimeTool = mock(DateTimeTool.class);
     private final GeocodeTool geocodeTool = mock(GeocodeTool.class);
     private final SearchNearbyTool searchNearbyTool = mock(SearchNearbyTool.class);
     private final PlanRouteTool planRouteTool = mock(PlanRouteTool.class);
     private final TextToSpeechTool textToSpeechTool = mock(TextToSpeechTool.class);
     private final TarotTool tarotTool = mock(TarotTool.class);
-    private final DateTimeTool dateTimeTool = mock(DateTimeTool.class);
     private final RemindTool remindTool = mock(RemindTool.class);
     private final ScheduledTaskTool scheduledTaskTool = mock(ScheduledTaskTool.class);
     private final ImageGenerationTool imageGenerationTool = mock(ImageGenerationTool.class);

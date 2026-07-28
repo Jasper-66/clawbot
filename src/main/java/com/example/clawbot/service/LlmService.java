@@ -4,21 +4,16 @@ import com.example.clawbot.memory.JpaChatMemory;
 import com.example.clawbot.tool.*;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
-import org.springframework.ai.model.Media;
-import org.springframework.ai.openai.OpenAiChatModel;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
-import org.springframework.util.MimeTypeUtils;
 import org.springframework.web.client.RestTemplate;
 
 import java.util.*;
@@ -31,7 +26,6 @@ import java.util.*;
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class LlmService {
 
     private final RestTemplate restTemplate;
@@ -86,6 +80,32 @@ public class LlmService {
                     + "1. 仅提供科普知识，严禁提供诊断、处方、用药建议或治疗方案\n"
                     + "2. 回复开头必须加上：【仅供科普参考，不能替代医师诊断，身体不适请及时就医】\n"
                     + "3. 如用户询问具体的诊断或治疗问题，请引导其前往医院就诊";
+
+    public LlmService(RestTemplate restTemplate,
+                      JpaChatMemory chatMemory,
+                      WeatherTool weatherTool,
+                      DateTimeTool dateTimeTool,
+                      TextToSpeechTool textToSpeechTool,
+                      GeocodeTool geocodeTool,
+                      SearchNearbyTool searchNearbyTool,
+                      PlanRouteTool planRouteTool,
+                      TarotTool tarotTool,
+                      RemindTool remindTool,
+                      ScheduledTaskTool scheduledTaskTool,
+                      ImageGenerationTool imageGenerationTool) {
+        this.restTemplate = restTemplate;
+        this.chatMemory = chatMemory;
+        this.weatherTool = weatherTool;
+        this.dateTimeTool = dateTimeTool;
+        this.textToSpeechTool = textToSpeechTool;
+        this.geocodeTool = geocodeTool;
+        this.searchNearbyTool = searchNearbyTool;
+        this.planRouteTool = planRouteTool;
+        this.tarotTool = tarotTool;
+        this.remindTool = remindTool;
+        this.scheduledTaskTool = scheduledTaskTool;
+        this.imageGenerationTool = imageGenerationTool;
+    }
 
     /**
      * 文本对话入口 — 使用 RestTemplate 调用 DeepSeek API，支持 Function Calling。
@@ -164,7 +184,7 @@ public class LlmService {
             String lastReply = null;
 
             for (int round = 0; round <= MAX_TOOL_ROUNDS; round++) {
-                JsonNode assistant = callChatCompletion(requestBody);
+                JsonNode assistant = callChatCompletion(apiKey, baseUrl, requestBody);
                 JsonNode toolCalls = assistant.path("tool_calls");
 
                 // 无工具调用 → 检查是否幻觉后返回
@@ -244,17 +264,26 @@ public class LlmService {
                 || reply.contains("已设置") || reply.contains("提醒ID");
     }
 
-    private JsonNode callChatCompletion(Map<String, Object> requestBody) throws Exception {
+    /**
+     * 调用 LLM Chat Completion API（参数化版本，支持不同 API 端点）。
+     */
+    private JsonNode callChatCompletion(String apiUrl, String key,
+                                        Map<String, Object> requestBody) throws Exception {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.setBearerAuth(apiKey);
+        headers.setBearerAuth(key);
 
         String requestJson = objectMapper.writeValueAsString(requestBody);
-        log.info("→ 调用 LLM: model={}", requestBody.get("model"));
+        log.info("→ 调用 LLM: model={}, url={}", requestBody.get("model"), apiUrl);
         ResponseEntity<String> response = restTemplate.postForEntity(
-                baseUrl + "/v1/chat/completions", new HttpEntity<>(requestJson, headers), String.class);
+                apiUrl + "/v1/chat/completions", new HttpEntity<>(requestJson, headers), String.class);
 
-        JsonNode root = objectMapper.readTree(response.getBody());
+        String responseBody = response.getBody();
+        if (responseBody == null) {
+            throw new IllegalStateException("LLM 返回空响应");
+        }
+
+        JsonNode root = objectMapper.readTree(responseBody);
         if (root.has("error")) throw new IllegalStateException("LLM API 错误: " + root.get("error"));
 
         JsonNode choices = root.path("choices");
@@ -309,6 +338,17 @@ public class LlmService {
         String today = java.time.LocalDate.now().toString();
         List<Map<String, Object>> messages = new ArrayList<>();
         messages.add(Map.of("role", "system", "content", SYSTEM_PROMPT + "\n当前日期：" + today));
+
+        // 加载对话历史（图片识别上下文）
+        List<Message> history = chatMemory.get(userId, MAX_HISTORY);
+        for (Message msg : history) {
+            if (msg instanceof UserMessage um) {
+                messages.add(Map.of("role", "user", "content", um.getText()));
+            } else if (msg instanceof AssistantMessage am) {
+                messages.add(Map.of("role", "assistant", "content", am.getText()));
+            }
+        }
+
         messages.add(Map.of("role", "user", "content", contentParts));
 
         Map<String, Object> requestBody = Map.of("model", visionModel, "messages", messages, "max_tokens", 1024);
@@ -328,15 +368,8 @@ public class LlmService {
 
     private String callLlm(String apiUrl, String key, Map<String, Object> requestBody) {
         try {
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.setBearerAuth(key);
-            String json = objectMapper.writeValueAsString(requestBody);
-            ResponseEntity<String> response = restTemplate.postForEntity(
-                    apiUrl + "/v1/chat/completions", new HttpEntity<>(json, headers), String.class);
-            JsonNode root = objectMapper.readTree(response.getBody());
-            if (root.has("error")) throw new IllegalStateException("API 错误: " + root.get("error"));
-            String content = root.path("choices").get(0).path("message").path("content").asText("").trim();
+            JsonNode message = callChatCompletion(apiUrl, key, requestBody);
+            String content = message.path("content").asText("").trim();
             return content.isEmpty() ? "抱歉，AI 服务暂时不可用。" : content;
         } catch (Exception e) {
             log.error("LLM 调用失败: {}", e.getMessage());
