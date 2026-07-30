@@ -1,0 +1,1 @@
+import{a as t}from"./index-CzApALvg.js";const s=t.create({baseURL:"/api/conversations"});function a(){return s.get("")}function o(e){return s.get(`/${e}/messages`)}function r(e){return s.delete(`/${e}`)}export{r as d,o as g,a as l};

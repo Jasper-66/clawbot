@@ -1,9 +1,14 @@
 package com.example.clawbot.config;
 
+import com.example.clawbot.knowledge.repository.KnowledgeDocumentRepository;
 import com.example.clawbot.repository.ConversationRepository;
 import com.example.clawbot.repository.MessageRepository;
 import com.example.clawbot.repository.ReminderRepository;
+<<<<<<< HEAD
 import com.example.clawbot.resume.repository.ApplicationRecordRepository;
+=======
+import com.example.clawbot.repository.TokenUsageRepository;
+>>>>>>> lichanglin
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -11,16 +16,20 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 @Slf4j
-// 应用启动时自动创建 SQLite 数据库表结构
-@Component    //告诉Spring 这是一个组件
+@Component
 @RequiredArgsConstructor
 public class DatabaseInitializer {
 
     private final ConversationRepository conversationRepository;
     private final MessageRepository messageRepository;
     private final ReminderRepository reminderRepository;
+<<<<<<< HEAD
     private final JdbcTemplate jdbcTemplate;
     private final ApplicationRecordRepository applicationRecordRepository;
+=======
+    private final KnowledgeDocumentRepository knowledgeDocumentRepository;
+    private final TokenUsageRepository tokenUsageRepository;
+>>>>>>> lichanglin
 
     @PostConstruct
     public void init() {
@@ -28,8 +37,13 @@ public class DatabaseInitializer {
         conversationRepository.createTable();
         messageRepository.createTable();
         reminderRepository.createTable();
+<<<<<<< HEAD
         createUserProfilesTable();
         applicationRecordRepository.createTable();
+=======
+        knowledgeDocumentRepository.createTable();
+        tokenUsageRepository.createTable();
+>>>>>>> lichanglin
         log.info("数据库表初始化完成");
     }
 
