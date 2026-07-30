@@ -10,7 +10,7 @@ import org.springframework.stereotype.Service;
 @Slf4j
 @Service
 public class
-ResumeOptimizerImpl implements ResumeOptimizer {
+ ResumeOptimizerImpl implements ResumeOptimizer {
 
     @Override
     public String generateOptimizationTip(UserProfile profile, JobListing job) {
