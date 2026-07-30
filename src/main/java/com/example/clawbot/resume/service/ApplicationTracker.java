@@ -13,8 +13,7 @@ public interface
 ApplicationTracker {
 
     /**
-     * 记录一次投递。
-     *
+     * 记录一次
      * 【被谁调用】ResumeOrchestrator.autoApply() 的第六步，投递成功后调用
      * 【返回值】  保存后的 ApplicationRecord
      *
@@ -27,8 +26,7 @@ ApplicationTracker {
     ApplicationRecord record(ApplicationResult result, String userId);
 
     /**
-     * 批量记录投递。
-     *
+     * 批量记录
      * 【被谁调用】ResumeOrchestrator.batchApply() 完成后调用
      * 【返回值】  保存成功的记录数
      */
