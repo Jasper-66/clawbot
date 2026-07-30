@@ -12,6 +12,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -31,6 +32,7 @@ public class WeChatBotService {
 
     private final FileSummaryService fileSummaryService;
     private final ReminderService reminderService;
+    private final com.example.clawbot.tool.ReminderTool reminderTool;
 
     private ILinkClient client;
 
@@ -67,6 +69,9 @@ public class WeChatBotService {
             client.getLoginFuture().get();
             loggedIn = true;
             log.info("ClawBot 登录成功，botId={}", client.getLoginContext().getBotId());
+
+            // ── 重启恢复：扫描数据库中的提醒任务，补偿遗漏 ──
+            recoverReminders();
 
             // 开始轮询消息
             pollMessages();
@@ -138,6 +143,9 @@ public class WeChatBotService {
                     } else if (isImageGenRequest(text)) {
                         log.info("[行动] 匹配到「图片生成」关键词，路由到AI绘图模块");
                         handleImageGeneration(fromUser, text);
+                    } else if (isReminderRequest(text)) {
+                        log.info("[行动] 匹配到「提醒」关键词，路由到提醒模块（LLM解析 → 调用工具）");
+                        handleReminder(fromUser, text);
                     } else {
                         log.info("[行动] 未命中特殊关键词，作为通用对话路由到 LLM 服务 (DeepSeek Function Calling)");
                         String reply = llmService.chat(fromUser, text);
@@ -276,6 +284,59 @@ public class WeChatBotService {
                 .replaceAll("生成图片|生成图像|生成一张|生成个图|画一个|画一张|画个|画一只|画只|画幅|帮我画|图片生成|图像生成|做一张图|做个图|来一张|来张|生成|图片|图像|照片|图", "")
                 .trim();
         return prompt.isEmpty() ? text : prompt;
+    }
+
+    // ═══════════════════════════════════════════════════
+    // 提醒功能：关键词检测 + LLM解析 + 工具调用
+    // ═══════════════════════════════════════════════════
+    static boolean isReminderRequest(String text) {
+        if (text == null || text.isBlank()) return false;
+        return text.contains("提醒") || text.contains("闹钟") || text.contains("定时");
+    }
+
+    private void handleReminder(String fromUser, String text) {
+        log.info("[行动] 提醒模块: 用户消息 \"{}\"，调用 LLM 解析时间和内容", text);
+        try {
+            // 用 LLM 解析用户消息，提取时间和内容
+            String parsePrompt = "请从以下用户消息中提取提醒时间和提醒内容。当前时间是 "
+                    + java.time.OffsetDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+                    + "。用户消息: \"" + text + "\"\n\n"
+                    + "请严格返回JSON格式（不要返回其他内容）:\n"
+                    + "{\"content\":\"提醒内容\",\"trigger_at\":\"ISO8601时间+08:00\",\"type\":\"text\"}\n"
+                    + "type可选: text/voice/both。如果没有明确时间，返回 {\"error\":\"需要明确时间\"}";
+
+            String parseResult = llmService.chat(fromUser, parsePrompt);
+            log.info("[观察] LLM 解析结果: {}", parseResult);
+
+            // 解析 JSON
+            com.fasterxml.jackson.databind.JsonNode json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(parseResult);
+
+            if (json.has("error")) {
+                sendReply(fromUser, "请告诉我具体的提醒时间，比如「5分钟后提醒我喝水」或「明天早上8点提醒我开会」");
+                return;
+            }
+
+            String content = json.get("content").asText();
+            String triggerAt = json.get("trigger_at").asText();
+            String type = json.has("type") ? json.get("type").asText() : "text";
+
+            // 调用 ReminderTool
+            log.info("[行动] 调用 ReminderTool: content=\"{}\", triggerAt=\"{}\", type={}", content, triggerAt, type);
+            String toolResult = reminderTool.createReminder(content, triggerAt, type, fromUser);
+            log.info("[观察] ReminderTool 返回: {}", toolResult);
+
+            // 解析工具返回结果
+            com.fasterxml.jackson.databind.JsonNode resultJson = new com.fasterxml.jackson.databind.ObjectMapper().readTree(toolResult);
+            if (resultJson.has("success") && resultJson.get("success").asBoolean()) {
+                sendReply(fromUser, "✅ 提醒已设置！\n📝 " + content + "\n⏰ " + triggerAt);
+            } else {
+                String msg = resultJson.has("message") ? resultJson.get("message").asText() : "设置失败";
+                sendReply(fromUser, "❌ 提醒设置失败: " + msg);
+            }
+        } catch (Exception e) {
+            log.error("[异常] 提醒处理失败 | 用户: {} | 原因: {}", fromUser, e.getMessage(), e);
+            sendReply(fromUser, "抱歉，提醒设置失败，请稍后再试。");
+        }
     }
 
     private boolean isTtsRequest(String text) {
@@ -426,38 +487,110 @@ public class WeChatBotService {
                 .trim();
     }
 
+    // ═══════════════════════════════════════════════════
+    // 重启恢复：扫描数据库，补偿遗漏的提醒任务
+    // ═══════════════════════════════════════════════════
+    private void recoverReminders() {
+        log.info("══════════ [恢复] 开始扫描数据库中的提醒任务 ══════════");
+        try {
+            List<ReminderService.ReminderTask> allPending = reminderService.getAllPendingReminders();
+            Instant now = Instant.now();
+
+            // 分离：已过期的（遗漏任务）和 未到期的（正常等待）
+            List<ReminderService.ReminderTask> missed = allPending.stream()
+                    .filter(t -> !t.triggerAt().isAfter(now))
+                    .toList();
+            List<ReminderService.ReminderTask> upcoming = allPending.stream()
+                    .filter(t -> t.triggerAt().isAfter(now))
+                    .toList();
+
+            log.info("  ├─ 扫描到 {} 条待发送提醒", allPending.size());
+            log.info("  ├─ 遗漏任务（已过期）: {} 条", missed.size());
+            log.info("  └─ 未到期任务: {} 条", upcoming.size());
+
+            // 补偿遗漏任务
+            if (!missed.isEmpty()) {
+                log.info("══════════ [补偿] 开始补发 {} 条遗漏提醒 ══════════", missed.size());
+                for (ReminderService.ReminderTask task : missed) {
+                    try {
+                        sendReminder(task);
+
+                        if (task.periodic()) {
+                            // 周期性：更新下次触发时间，不删除
+                            reminderService.reschedule(task.id());
+                            log.info("  ├─ 周期性提醒已补偿并重新调度: id={}, content=\"{}\", nextTriggerAt已更新",
+                                    task.id(), task.content());
+                        } else {
+                            // 一次性：标记已发送
+                            reminderService.markSent(task.id());
+                            log.info("  ├─ 一次性提醒已补偿: id={}, content=\"{}\"", task.id(), task.content());
+                        }
+                    } catch (Exception e) {
+                        log.error("  ├─ 补偿提醒失败: id={}, userId={}", task.id(), task.userId(), e);
+                    }
+                }
+                log.info("══════════ [补偿] 遗漏提醒补发完成 ══════════");
+            }
+
+            if (!upcoming.isEmpty()) {
+                log.info("══════════ [恢复] {} 条未到期任务已恢复，等待定时触发 ══════════", upcoming.size());
+                for (ReminderService.ReminderTask task : upcoming) {
+                    log.info("  ├─ id={}, content=\"{}\", triggerAt={}", task.id(), task.content(), task.triggerAt());
+                }
+            }
+
+            log.info("══════════ [恢复] 提醒任务恢复流程完成 ══════════");
+        } catch (Exception e) {
+            log.error("══════════ [恢复] 提醒任务恢复失败 ══════════", e);
+        }
+    }
+
+    /**
+     * 发送单条提醒（文本/语音），供 recoverReminders() 和 sendDueReminders() 共用。
+     */
+    private void sendReminder(ReminderService.ReminderTask task) throws Exception {
+        String reminderText = "⏰ 提醒：" + task.content();
+        if (task.type() == ReminderService.ReminderType.TEXT
+                || task.type() == ReminderService.ReminderType.BOTH) {
+            client.sendText(task.userId(), reminderText);
+        }
+        if (task.type() == ReminderService.ReminderType.VOICE
+                || task.type() == ReminderService.ReminderType.BOTH) {
+            byte[] audioData = speechService.textToSpeech(task.userId(), reminderText);
+            client.sendFile(task.userId(), audioData, "定时提醒.wav", "");
+        }
+    }
+
     @Scheduled(fixedDelayString = "${reminder.check-interval-ms:10000}")
     public void sendDueReminders() {
         if (!running || !loggedIn || client == null) {
+            log.warn("[定时扫描] 跳过: running={}, loggedIn={}, client={}", running, loggedIn, client != null);
             return;
         }
 
-        for (ReminderService.ReminderTask task : reminderService.getDueReminders()) {
+        List<ReminderService.ReminderTask> dueTasks = reminderService.getDueReminders();
+        log.info("[定时扫描] 检查到期提醒... 共 {} 条待发送", dueTasks.size());
+        if (!dueTasks.isEmpty()) {
+            log.info("[定时扫描] 发现 {} 条到期提醒，开始发送", dueTasks.size());
+        }
+
+        for (ReminderService.ReminderTask task : dueTasks) {
             try {
-                String reminderText = "⏰ 提醒：" + task.content();
-                if (task.type() == ReminderService.ReminderType.TEXT
-                        || task.type() == ReminderService.ReminderType.BOTH) {
-                    client.sendTextWithTyping(task.userId(), reminderText, 500);
-                }
-                if (task.type() == ReminderService.ReminderType.VOICE
-                        || task.type() == ReminderService.ReminderType.BOTH) {
-                    byte[] audioData = speechService.textToSpeech(task.userId(), reminderText);
-                    client.sendFile(task.userId(), audioData, "定时提醒.wav", "");
-                }
+                log.info("[定时扫描] 发送提醒: id={}, userId={}, content=\"{}\", triggerAt={}",
+                        task.id(), task.userId(), task.content(), task.triggerAt());
+                sendReminder(task);
 
                 if (task.periodic()) {
-                    // 周期性提醒：重新调度到下一个周期
                     reminderService.reschedule(task.id());
-                    log.info("周期性提醒已发送并重新调度: id={}, userId={}, interval={}s",
-                            task.id(), task.userId(), task.intervalSeconds());
+                    log.info("[定时扫描] 周期性提醒已发送并重新调度: id={}, interval={}s",
+                            task.id(), task.intervalSeconds());
                 } else {
-                    // 一次性提醒：标记已发送，从存储中移除
                     reminderService.markSent(task.id());
-                    log.info("提醒已发送: id={}, userId={}, type={}",
-                            task.id(), task.userId(), task.type());
+                    log.info("[定时扫描] 一次性提醒已发送并标记完成: id={}", task.id());
                 }
             } catch (Exception e) {
-                log.error("发送提醒失败: id={}, userId={}", task.id(), task.userId(), e);
+                log.warn("[定时扫描] 发送提醒失败（下次扫描重试）: id={}, userId={}, 原因: {}",
+                        task.id(), task.userId(), e.getMessage());
             }
         }
     }
