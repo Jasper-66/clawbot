@@ -1,16 +1,85 @@
 package com.example.clawbot.service;
 
+import com.example.clawbot.repository.ReminderRepository;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
 
 class ReminderServiceTest {
 
-    private final ReminderService reminderService = new ReminderService();
+    private ReminderRepository reminderRepository;
+    private ReminderService reminderService;
+
+    // 模拟数据库存储
+    private final List<ReminderRepository.ReminderRow> store = new ArrayList<>();
+
+    @BeforeEach
+    void setUp() {
+        store.clear();
+        reminderRepository = mock(ReminderRepository.class);
+        reminderService = new ReminderService(reminderRepository);
+
+        // 模拟 insert：存入 store
+        doAnswer(inv -> {
+            String id = inv.getArgument(0);
+            String userId = inv.getArgument(1);
+            String content = inv.getArgument(2);
+            Instant triggerAt = inv.getArgument(3);
+            String type = inv.getArgument(4);
+            boolean periodic = inv.getArgument(5);
+            long interval = inv.getArgument(6);
+            store.add(new ReminderRepository.ReminderRow(id, userId, content, triggerAt, type, periodic, interval, "pending"));
+            return null;
+        }).when(reminderRepository).insert(anyString(), anyString(), anyString(), any(), anyString(), anyBoolean(), anyLong());
+
+        // 模拟 findAllPending
+        when(reminderRepository.findAllPending()).thenAnswer(inv ->
+                store.stream().filter(r -> "pending".equals(r.status())).toList());
+
+        // 模拟 findPendingByTriggerAtBefore
+        when(reminderRepository.findPendingByTriggerAtBefore(any())).thenAnswer(inv -> {
+            Instant now = inv.getArgument(0);
+            return store.stream()
+                    .filter(r -> "pending".equals(r.status()) && !r.triggerAt().isAfter(now))
+                    .toList();
+        });
+
+        // 模拟 markSent
+        doAnswer(inv -> {
+            String id = inv.getArgument(0);
+            store.stream().filter(r -> r.id().equals(id)).findFirst()
+                    .ifPresent(r -> {
+                        int idx = store.indexOf(r);
+                        store.set(idx, new ReminderRepository.ReminderRow(
+                                r.id(), r.userId(), r.content(), r.triggerAt(),
+                                r.reminderType(), r.periodic(), r.intervalSeconds(), "sent"));
+                    });
+            return null;
+        }).when(reminderRepository).markSent(anyString());
+
+        // 模拟 updateTriggerAt
+        doAnswer(inv -> {
+            String id = inv.getArgument(0);
+            Instant next = inv.getArgument(1);
+            store.stream().filter(r -> r.id().equals(id)).findFirst()
+                    .ifPresent(r -> {
+                        int idx = store.indexOf(r);
+                        store.set(idx, new ReminderRepository.ReminderRow(
+                                r.id(), r.userId(), r.content(), next,
+                                r.reminderType(), r.periodic(), r.intervalSeconds(), r.status()));
+                    });
+            return null;
+        }).when(reminderRepository).updateTriggerAt(anyString(), any());
+    }
 
     @Test
     void shouldCreateAndReturnDueVoiceReminder() {
@@ -101,7 +170,7 @@ class ReminderServiceTest {
         // 对一次性提醒调用 reschedule 应静默跳过
         reminderService.reschedule(task.id());
 
-        // 提醒仍在 Map 中，未受影响
+        // 提醒仍在，未受影响
         List<ReminderService.ReminderTask> due =
                 reminderService.getDueReminders(triggerAt.plusSeconds(1));
         assertThat(due).hasSize(1);

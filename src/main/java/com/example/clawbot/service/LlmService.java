@@ -10,6 +10,7 @@ import com.example.clawbot.tool.SearchNearbyTool;
 import com.example.clawbot.tool.TarotTool;
 import com.example.clawbot.tool.TextToSpeechTool;
 import com.example.clawbot.tool.WeatherTool;
+import com.example.clawbot.resume.tool.ResumeTool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -60,6 +61,7 @@ public class LlmService {
                       ChatClient.Builder chatClientBuilder,
                       ConversationRepository conversationRepository,
                       MessageRepository messageRepository,
+                      //注入我们写的工具
                       SqliteChatMemory chatMemory,
                       WeatherTool weatherTool,
                       GeocodeTool geocodeTool,
@@ -67,11 +69,13 @@ public class LlmService {
                       PlanRouteTool planRouteTool,
                       TextToSpeechTool textToSpeechTool,
                       ReminderTool reminderTool,
-                      TarotTool tarotTool) {
+                      TarotTool tarotTool,
+                      ResumeTool resumeTool) {
         this.restTemplate = restTemplate;
         this.conversationRepository = conversationRepository;
         this.messageRepository = messageRepository;
         this.chatClient = chatClientBuilder
+
                 .defaultTools(
                         weatherTool,
                         geocodeTool,
@@ -79,9 +83,12 @@ public class LlmService {
                         planRouteTool,
                         textToSpeechTool,
                         reminderTool,
-                        tarotTool
+                        tarotTool,
+                        resumeTool
                 )
-                .defaultAdvisors(MessageChatMemoryAdvisor.builder(chatMemory).build())
+                //关键：配置记忆顾问（秘书）
+                .defaultAdvisors(
+                        MessageChatMemoryAdvisor.builder(chatMemory).build())
                 .build();
     }
 
@@ -95,10 +102,13 @@ public class LlmService {
 
     private static final String SYSTEM_PROMPT =
             "你是一个友好的微信助手，请用简洁、自然的中文回答用户的问题。回答尽量控制在200字以内。\n"
-                    + "【重要规则】当用户明确要求语音回复、朗读、播报、讲故事/笑话等需要以语音形式呈现内容时，"
+                    + "【重要规则-语音】当用户明确要求语音回复、朗读、播报、讲故事/笑话等需要以语音形式呈现内容时，"
                     + "你必须先生成回复内容，然后调用 text_to_speech 工具将内容转为语音。"
                     + "调用工具后，在最终回复中保留 [audio:工具返回的file_path] 标记，以便系统发送语音给用户。\n"
-                    + "如果用户没有要求语音，不要主动调用 text_to_speech 工具。";
+                    + "如果用户没有要求语音，不要主动调用 text_to_speech 工具。\n"
+                    + "【重要规则-提醒】当用户要求设置提醒、定时提醒时，你必须调用 create_reminder 或 create_periodic_reminder 工具。"
+                    + "绝对不要自己编造'已设置成功'的回复，只有工具返回 success=true 才算设置成功。"
+                    + "如果用户没有提供明确时间，先询问用户。";
 
     public String chat(String userId, String userMessage) {
         long startTime = System.currentTimeMillis();
@@ -109,31 +119,28 @@ public class LlmService {
         log.info("  请求内容: system提示词 + 7个Function Calling工具定义 + 对话历史 + 用户消息 \"{}\"", messagePreview);
         log.info("  → LLM 可在本轮自动调用工具 (weather/reminder/nearby/route/geocode/tts/tarot)");
 
+        // ① 获取或创建会话ID（这步还是需要的）
         String conversationId = conversationRepository.getOrCreate(userId, userMessage);
 
         try {
+            // ② 使用 Fluent API（流式 API），Advisor 自动管记忆
             String reply = chatClient.prompt()
-                    .system(buildSystemPrompt(userId))
-                    .user(userMessage)
+                    .system(buildSystemPrompt(userId))   // 设置系统提示此
+                    .user(userMessage)                    // 用户消息
+                    // 给记忆顾问传参：告诉她"我要存/取哪个会话的消息"
+                    // CHAT_MEMORY_CONVERSATION_ID_KEY 是 Spring AI 规定的常量 = "chat_memory_conversation_id"
                     .advisors(a -> a.param(
                             AbstractChatMemoryAdvisor.CHAT_MEMORY_CONVERSATION_ID_KEY,
                             conversationId
                     ))
+                    //执行调用（发送给AI）
                     .call()
+                    //去除ai的回复文本
                     .content();
-
-            long elapsed = System.currentTimeMillis() - startTime;
-            String replyPreview = reply != null && reply.length() > 100
-                    ? reply.substring(0, 100) + "..."
-                    : reply;
-            log.info("[观察] DeepSeek 返回响应 (耗时{}ms, {}字符): \"{}\"",
-                    elapsed, reply != null ? reply.length() : 0, replyPreview);
 
             return reply != null ? reply.trim() : "抱歉，我没有生成有效回复，请稍后再试。";
         } catch (Exception e) {
-            long elapsed = System.currentTimeMillis() - startTime;
-            log.error("[异常] DeepSeek API 调用失败 (耗时{}ms) | 原因: {} | 建议: 检查 deepseek.api.key 配置和网络连接",
-                    elapsed, e.getMessage(), e);
+            log.error("ChatClient 调用失败", e);
             return "抱歉，我暂时无法处理，请稍后再试。";
         }
     }
