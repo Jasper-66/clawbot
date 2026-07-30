@@ -37,6 +37,21 @@ public interface ResumeParser {
     UserProfile parseFromFile(String userId, byte[] fileBytes, String fileName);
 
     /**
+     * 从简历图片中提取并解析简历内容。
+     *
+     * 【被谁调用】用户发送简历图片时，由 ResumeOrchestrator 调用
+     * 【返回值】  UserProfile（包含完整的简历信息）
+     *
+     * 【实现流程】
+     *   1. 使用视觉多模态模型（DashScope qwen-vl）识别图片中的文字
+     *   2. 构建提示词：要求视觉模型输出简历的完整文字内容
+     *   3. 将提取到的文本交给文本 LLM 解析为结构化 JSON → UserProfile
+     *   4. 将原始简历文本保存到 UserProfile.rawResumeText
+     *   5. 返回 UserProfile
+     */
+    UserProfile parseFromImage(String userId, byte[] imageBytes, String fileName);
+
+    /**
      * 保存/更新用户简历到数据库。
      *
      * 【被谁调用】简历解析完成后，由 ResumeOrchestrator 调用
