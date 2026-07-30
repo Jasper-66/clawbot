@@ -4,11 +4,8 @@ import com.example.clawbot.knowledge.repository.KnowledgeDocumentRepository;
 import com.example.clawbot.repository.ConversationRepository;
 import com.example.clawbot.repository.MessageRepository;
 import com.example.clawbot.repository.ReminderRepository;
-<<<<<<< HEAD
-import com.example.clawbot.resume.repository.ApplicationRecordRepository;
-=======
 import com.example.clawbot.repository.TokenUsageRepository;
->>>>>>> lichanglin
+import com.example.clawbot.resume.repository.ApplicationRecordRepository;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -23,13 +20,10 @@ public class DatabaseInitializer {
     private final ConversationRepository conversationRepository;
     private final MessageRepository messageRepository;
     private final ReminderRepository reminderRepository;
-<<<<<<< HEAD
-    private final JdbcTemplate jdbcTemplate;
-    private final ApplicationRecordRepository applicationRecordRepository;
-=======
     private final KnowledgeDocumentRepository knowledgeDocumentRepository;
     private final TokenUsageRepository tokenUsageRepository;
->>>>>>> lichanglin
+    private final JdbcTemplate jdbcTemplate;
+    private final ApplicationRecordRepository applicationRecordRepository;
 
     @PostConstruct
     public void init() {
@@ -37,13 +31,10 @@ public class DatabaseInitializer {
         conversationRepository.createTable();
         messageRepository.createTable();
         reminderRepository.createTable();
-<<<<<<< HEAD
-        createUserProfilesTable();
-        applicationRecordRepository.createTable();
-=======
         knowledgeDocumentRepository.createTable();
         tokenUsageRepository.createTable();
->>>>>>> lichanglin
+        createUserProfilesTable();
+        applicationRecordRepository.createTable();
         log.info("数据库表初始化完成");
     }
 

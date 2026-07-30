@@ -1,9 +1,11 @@
 package com.example.clawbot.service;
 
+import com.example.clawbot.knowledge.service.KnowledgeRetriever;
 import com.example.clawbot.repository.ConversationRepository;
 import com.example.clawbot.repository.MessageRepository;
 import com.example.clawbot.repository.ReminderRepository;
 import com.example.clawbot.repository.SqliteChatMemory;
+import com.example.clawbot.repository.TokenUsageRepository;
 import com.example.clawbot.tool.GeocodeTool;
 import com.example.clawbot.tool.PlanRouteTool;
 import com.example.clawbot.tool.ReminderTool;
@@ -82,11 +84,14 @@ class LlmServiceFunctionCallingTest {
         ChatClient.Builder chatClientBuilder = mock(ChatClient.Builder.class, RETURNS_SELF);
         ConversationRepository conversationRepository = mock(ConversationRepository.class);
         MessageRepository messageRepository = mock(MessageRepository.class);
+        KnowledgeRetriever knowledgeRetriever = mock(KnowledgeRetriever.class);
+        TokenUsageRepository tokenUsageRepository = mock(TokenUsageRepository.class);
         SqliteChatMemory chatMemory = mock(SqliteChatMemory.class);
 
         llmService = new LlmService(
                 restTemplate, chatClientBuilder, conversationRepository, messageRepository,
-                chatMemory, weatherTool, geocodeTool, searchNearbyTool, planRouteTool,
+                knowledgeRetriever, tokenUsageRepository, chatMemory,
+                weatherTool, geocodeTool, searchNearbyTool, planRouteTool,
                 textToSpeechTool, reminderTool, tarotTool, null);
 
         // 通过反射注入配置值（避免依赖 Spring 容器和 application.properties）

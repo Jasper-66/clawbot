@@ -9,6 +9,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
@@ -17,10 +19,11 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
-// ── 成员5: 投递执行实现 ──
+// ── 成员5: 投递执行实现（通用/腾讯/默认）──
 @Slf4j
 @Service
 @RequiredArgsConstructor
+@ConditionalOnProperty(name = "resume.platform.provider", havingValue = "tencent", matchIfMissing = true)
 public class ApplicationClientImpl implements ApplicationClient {
 
     private final RestTemplate restTemplate;
