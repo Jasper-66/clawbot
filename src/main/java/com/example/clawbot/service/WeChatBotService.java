@@ -48,6 +48,7 @@ public class WeChatBotService {
     private final SpeechService speechService;
     private final FileSummaryService fileSummaryService;
     private final MessageLogRepository messageLogRepository;
+    private final com.example.clawbot.liepin.tool.LiepinTool liepinTool;
 
     /** 全局防重复发送：key=userId:replyHash → 上次发送时间戳 */
     private final Map<String, Long> recentlySent = new ConcurrentHashMap<>();
@@ -71,7 +72,7 @@ public class WeChatBotService {
                 log.info("══════════ [思考] 收到文本消息 ══════════");
                 log.info("  发信人: {}", fromUser);
                 log.info("  内容: \"{}\"", preview);
-                log.info("  → 按优先级匹配关键词: 音色命令 → TTS请求 → 图片生成 → 兜底LLM对话");
+                log.info("  → 按优先级匹配关键词: 音色命令 → TTS请求 → LLM对话（含图片生成等工具）");
                 saveMessage(fromUser, text, "text", "in");
 
                 try {
@@ -81,11 +82,10 @@ public class WeChatBotService {
                     } else if (isTtsRequest(text)) {
                         log.info("[行动] 匹配到「TTS朗读」关键词，路由到语音合成模块");
                         handleTts(client, fromUser, extractTtsText(text));
-                    } else if (isImageGenRequest(text)) {
-                        log.info("[行动] 匹配到「图片生成」关键词，路由到AI绘图模块");
-                        handleImageGeneration(client, fromUser, text);
+                    } else if (isJobSearchRequest(text)) {
+                        log.info("[行动] 匹配到「求职」关键词，路由到猎聘工具");
+                        handleJobSearch(client, fromUser, text);
                     } else {
-                        log.info("[行动] 未命中特殊关键词，作为通用对话路由到 LLM 服务 (DeepSeek Function Calling)");
                         String reply = llmService.chat(fromUser, text);
                         handleLlmReply(client, fromUser, reply);
                     }
@@ -437,5 +437,52 @@ public class WeChatBotService {
         return text.trim()
                 .replaceFirst("^(请帮我|麻烦帮我|帮我|麻烦|我想|我要|给我|请)\\s*", "")
                 .trim();
+    }
+
+    // ==================== 求职关键词检测 ====================
+
+    /**
+     * 判断是否为求职相关请求。
+     */
+    private boolean isJobSearchRequest(String text) {
+        if (text == null || text.isBlank()) return false;
+        return text.contains("找工作") || text.contains("求职") || text.contains("推荐岗位")
+                || text.contains("推荐职位") || text.contains("岗位推荐") || text.contains("职位推荐")
+                || text.contains("招聘信息") || text.contains("投简历") || text.contains("投递简历")
+                || (text.contains("推荐") && (text.contains("岗位") || text.contains("职位") || text.contains("工作")));
+    }
+
+    /**
+     * 直接调用猎聘工具处理求职请求。
+     */
+    private void handleJobSearch(ILinkClient client, String fromUser, String text) {
+        try {
+            String result = liepinTool.liepin("search", extractJobKeyword(text), extractJobCity(text), null);
+            sendReply(client, fromUser, result);
+        } catch (Exception e) {
+            log.error("猎聘工具调用失败: {}", e.getMessage(), e);
+            // 降级到 LLM 对话
+            String reply = llmService.chat(fromUser, text);
+            handleLlmReply(client, fromUser, reply);
+        }
+    }
+
+    /**
+     * 从用户输入中提取职位关键词。
+     */
+    private String extractJobKeyword(String text) {
+        String cleaned = text.replaceAll("(帮我|请|麻烦|为我|我想|我要|找工作|求职|推荐|岗位|职位|招聘|投简历|投递|杭州|北京|上海|深圳|广州|成都|武汉|南京|西安|重庆|苏州|天津)", "").trim();
+        return cleaned.isEmpty() ? "Java" : cleaned;
+    }
+
+    /**
+     * 从用户输入中提取城市。
+     */
+    private String extractJobCity(String text) {
+        String[] cities = {"北京", "上海", "广州", "深圳", "杭州", "成都", "武汉", "南京", "西安", "重庆", "苏州", "天津"};
+        for (String city : cities) {
+            if (text.contains(city)) return city;
+        }
+        return "全国";
     }
 }

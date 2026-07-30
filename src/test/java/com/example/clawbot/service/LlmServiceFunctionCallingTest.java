@@ -1,5 +1,6 @@
 package com.example.clawbot.service;
 
+import com.example.clawbot.liepin.tool.LiepinTool;
 import com.example.clawbot.memory.JpaChatMemory;
 import com.example.clawbot.tool.*;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -15,6 +16,8 @@ import org.springframework.web.client.RestTemplate;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
@@ -52,6 +55,7 @@ class LlmServiceFunctionCallingTest {
     private final RemindTool remindTool = mock(RemindTool.class);
     private final ScheduledTaskTool scheduledTaskTool = mock(ScheduledTaskTool.class);
     private final ImageGenerationTool imageGenerationTool = mock(ImageGenerationTool.class);
+    private final LiepinTool liepinTool = mock(LiepinTool.class);
     private final JpaChatMemory chatMemory = mock(JpaChatMemory.class);
 
     private RestTemplate restTemplate;
@@ -64,13 +68,32 @@ class LlmServiceFunctionCallingTest {
      * <p>创建真实的 RestTemplate 并用 MockRestServiceServer 包装，
      * 然后手动构造 LlmService 并注入测试用的 API 配置。</p>
      */
+    /** 为 mock 工具生成最小有效定义 */
+    private Map<String, Object> mockToolDef(String name) {
+        return Map.of("type", "function", "function",
+                Map.of("name", name, "description", "test",
+                        "parameters", Map.of("type", "object", "properties", Map.of(), "required", List.of())));
+    }
+
     @BeforeEach
     void setUp() {
+        // 为所有 mock 工具设置 getToolDefinition 返回值，避免 tools 列表中出现 null
+        when(dateTimeTool.getToolDefinition()).thenReturn(mockToolDef("datetime_query"));
+        when(geocodeTool.getToolDefinition()).thenReturn(mockToolDef("geocode"));
+        when(searchNearbyTool.getToolDefinition()).thenReturn(mockToolDef("search_nearby"));
+        when(planRouteTool.getToolDefinition()).thenReturn(mockToolDef("plan_route"));
+        when(textToSpeechTool.getToolDefinition()).thenReturn(mockToolDef("text_to_speech"));
+        when(tarotTool.getToolDefinition()).thenReturn(mockToolDef("tarot_reading"));
+        when(remindTool.getToolDefinition()).thenReturn(mockToolDef("remind"));
+        when(scheduledTaskTool.getToolDefinition()).thenReturn(mockToolDef("schedule_task"));
+        when(imageGenerationTool.getToolDefinition()).thenReturn(mockToolDef("generate_image"));
+        when(liepinTool.getToolDefinition()).thenReturn(mockToolDef("liepin"));
+
         restTemplate = new RestTemplate();
         server = MockRestServiceServer.bindTo(restTemplate).build();
         llmService = new LlmService(restTemplate, chatMemory, weatherTool, dateTimeTool,
                 textToSpeechTool, geocodeTool, searchNearbyTool, planRouteTool,
-                tarotTool, remindTool, scheduledTaskTool, imageGenerationTool);
+                tarotTool, remindTool, scheduledTaskTool, imageGenerationTool, liepinTool);
 
         // 通过反射注入配置值（避免依赖 Spring 容器和 application.properties）
         ReflectionTestUtils.setField(llmService, "apiKey", "test-key");

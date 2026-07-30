@@ -29,6 +29,7 @@ import java.util.regex.Pattern;
 public class ScheduledTaskTool {
 
     private final ScheduledTaskRepository repository;
+    private final com.example.clawbot.service.ScheduledTaskScheduler taskScheduler;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private static final String NAME = "schedule_task";
@@ -129,6 +130,7 @@ public class ScheduledTaskTool {
                 .status("ACTIVE")
                 .build();
         repository.save(task);
+        taskScheduler.scheduleTask(task);
 
         String typeDesc = switch (taskType.toUpperCase()) {
             case "IMAGE" -> "🖼️ 定时图片生成";
@@ -184,6 +186,7 @@ public class ScheduledTaskTool {
         ScheduledTask task = opt.get();
         task.setStatus("CANCELLED");
         repository.save(task);
+        taskScheduler.cancelTask(task.getId());
         return "✅ 已删除定时任务：" + task.getContent();
     }
 

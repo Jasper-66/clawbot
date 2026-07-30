@@ -42,6 +42,7 @@ public class LlmService {
     private final RemindTool remindTool;
     private final ScheduledTaskTool scheduledTaskTool;
     private final ImageGenerationTool imageGenerationTool;
+    private final com.example.clawbot.liepin.tool.LiepinTool liepinTool;
 
     @Value("${deepseek.api.key}")
     private String apiKey;
@@ -92,7 +93,8 @@ public class LlmService {
                       TarotTool tarotTool,
                       RemindTool remindTool,
                       ScheduledTaskTool scheduledTaskTool,
-                      ImageGenerationTool imageGenerationTool) {
+                      ImageGenerationTool imageGenerationTool,
+                      com.example.clawbot.liepin.tool.LiepinTool liepinTool) {
         this.restTemplate = restTemplate;
         this.chatMemory = chatMemory;
         this.weatherTool = weatherTool;
@@ -104,6 +106,7 @@ public class LlmService {
         this.tarotTool = tarotTool;
         this.remindTool = remindTool;
         this.scheduledTaskTool = scheduledTaskTool;
+        this.liepinTool = liepinTool;
         this.imageGenerationTool = imageGenerationTool;
     }
 
@@ -138,7 +141,7 @@ public class LlmService {
         requestBody.put("messages", messages);
         requestBody.put("temperature", 0.7);
         requestBody.put("max_tokens", 1024);
-        requestBody.put("tools", List.of(
+        List<Map<String, Object>> tools = List.of(
                 weatherTool.getToolDefinition(),
                 dateTimeTool.getToolDefinition(),
                 textToSpeechTool.getToolDefinition(),
@@ -148,8 +151,11 @@ public class LlmService {
                 tarotTool.getToolDefinition(),
                 remindTool.getToolDefinition(),
                 scheduledTaskTool.getToolDefinition(),
-                imageGenerationTool.getToolDefinition()
-        ));
+                imageGenerationTool.getToolDefinition(),
+                liepinTool.getToolDefinition()
+        );
+        requestBody.put("tools", tools);
+        log.info("注册工具: {}", tools.stream().map(t -> ((Map<?,?>)t.get("function")).get("name")).toList());
         requestBody.put("tool_choice", "auto");
 
         // 4. Function Calling 循环（设置 RemindTool 的用户上下文）
@@ -319,6 +325,7 @@ public class LlmService {
         if (remindTool.getToolName().equals(functionName)) return remindTool.execute(functionName, arguments);
         if (scheduledTaskTool.getToolName().equals(functionName)) return scheduledTaskTool.execute(functionName, arguments);
         if (imageGenerationTool.getToolName().equals(functionName)) return imageGenerationTool.execute(functionName, arguments);
+        if (liepinTool.getToolName().equals(functionName)) return liepinTool.execute(functionName, arguments);
         return "工具调用失败：未找到工具 " + functionName;
     }
 
@@ -385,6 +392,21 @@ public class LlmService {
      */
     private String deduplicateReply(String reply) {
         if (reply == null || reply.isEmpty()) return reply;
+
+        // 循环去重，处理 2 份、3 份甚至更多份重复
+        String result = reply;
+        while (true) {
+            String deduped = deduplicateOnce(result);
+            if (deduped.equals(result)) break; // 没有更多重复
+            result = deduped;
+        }
+        return result;
+    }
+
+    /**
+     * 单次去重：检测内容是否为 N 份重复，若是则只保留 1 份。
+     */
+    private String deduplicateOnce(String reply) {
         String[] lines = reply.split("\\n", -1);
         int total = lines.length;
         if (total < 4) return reply;
@@ -394,7 +416,6 @@ public class LlmService {
         for (int split = total / 2; split <= searchEnd; split++) {
             int remaining = total - split;
             boolean match = true;
-            // 比较 lines[0..remaining-1] 和 lines[split..split+remaining-1]
             for (int i = 0; i < remaining; i++) {
                 if (!lines[i].equals(lines[split + i])) {
                     match = false;

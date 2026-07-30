@@ -35,6 +35,7 @@ import java.util.regex.Pattern;
 public class RemindTool {
 
     private final ScheduledTaskRepository repository;
+    private final com.example.clawbot.service.ScheduledTaskScheduler taskScheduler;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private static final String NAME = "remind";
@@ -125,6 +126,7 @@ public class RemindTool {
                 .status("ACTIVE")
                 .build();
         repository.save(task);
+        taskScheduler.scheduleTask(task);
 
         String repeatDesc = switch (parsed.repeatType) {
             case "DAILY" -> "每天";
@@ -171,6 +173,7 @@ public class RemindTool {
         ScheduledTask task = opt.get();
         task.setStatus("CANCELLED");
         repository.save(task);
+        taskScheduler.cancelTask(task.getId());
         return "✅ 已删除提醒：" + task.getContent();
     }
 
