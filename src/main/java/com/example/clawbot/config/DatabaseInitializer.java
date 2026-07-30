@@ -3,6 +3,7 @@ package com.example.clawbot.config;
 import com.example.clawbot.repository.ConversationRepository;
 import com.example.clawbot.repository.MessageRepository;
 import com.example.clawbot.repository.ReminderRepository;
+import com.example.clawbot.resume.repository.ApplicationRecordRepository;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -19,6 +20,7 @@ public class DatabaseInitializer {
     private final MessageRepository messageRepository;
     private final ReminderRepository reminderRepository;
     private final JdbcTemplate jdbcTemplate;
+    private final ApplicationRecordRepository applicationRecordRepository;
 
     @PostConstruct
     public void init() {
@@ -27,6 +29,7 @@ public class DatabaseInitializer {
         messageRepository.createTable();
         reminderRepository.createTable();
         createUserProfilesTable();
+        applicationRecordRepository.createTable();
         log.info("数据库表初始化完成");
     }
 
