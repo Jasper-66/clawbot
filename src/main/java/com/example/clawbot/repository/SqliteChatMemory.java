@@ -24,7 +24,7 @@ import java.util.Map;
 @Component
 @RequiredArgsConstructor
 public class SqliteChatMemory implements ChatMemory {
-
+    // ↑ 关键：implements ChatMemory = 我承诺遵守这个接口的规范
     private final JdbcTemplate jdbcTemplate;
     private final ConversationRepository conversationRepository;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -34,6 +34,7 @@ public class SqliteChatMemory implements ChatMemory {
     public void add(String conversationId, List<Message> messages) {
         String now = OffsetDateTime.now(ZONE).toString();
         for (Message message : messages) {
+            // ① 把 metadata（Map）转成 JSON 字符串存进去
             String metadataJson = null;
             try {
                 if (message.getMetadata() != null && !message.getMetadata().isEmpty()) {
@@ -42,6 +43,7 @@ public class SqliteChatMemory implements ChatMemory {
             } catch (Exception e) {
                 log.warn("序列化消息元数据失败: {}", e.getMessage());
             }
+            //insert到数据库
             jdbcTemplate.update(
                     "INSERT INTO messages (conversation_id, role, content, message_type, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                     conversationId,
@@ -65,6 +67,7 @@ public class SqliteChatMemory implements ChatMemory {
             """;
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, conversationId, lastN);
         List<Message> messages = new ArrayList<>();
+        //倒序查变为正序返回（从后往前遍历）
         for (int i = rows.size() - 1; i >= 0; i--) {
             try {
                 messages.add(deserialize(rows.get(i)));
@@ -80,11 +83,14 @@ public class SqliteChatMemory implements ChatMemory {
         jdbcTemplate.update("DELETE FROM messages WHERE conversation_id = ?", conversationId);
     }
 
+
+      //把数据库行转成Spring AI Message 对象
     private Message deserialize(Map<String, Object> row) {
         String role = (String) row.get("role");
         String content = (String) row.get("content");
         String metadataJson = (String) row.get("metadata");
-
+        // ① 把 JSON 字符串转回 Map
+        //Map.of()会创建一个不可空的空MAP
         Map<String, Object> metadata = Map.of();
         if (metadataJson != null && !metadataJson.isEmpty()) {
             try {
@@ -93,7 +99,7 @@ public class SqliteChatMemory implements ChatMemory {
                 log.warn("解析消息元数据失败: {}", e.getMessage());
             }
         }
-
+        // ② 根据角色创建不同类型的 Message 对象
         return switch (role.toUpperCase()) {
             case "USER" -> new UserMessage(content, List.of(), metadata);
             case "ASSISTANT" -> new AssistantMessage(content, metadata);
