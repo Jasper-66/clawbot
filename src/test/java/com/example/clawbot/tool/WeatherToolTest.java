@@ -1,10 +1,7 @@
 package com.example.clawbot.tool;
 
 import com.example.clawbot.service.WeatherService;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
@@ -17,30 +14,34 @@ class WeatherToolTest {
     private final WeatherTool weatherTool = new WeatherTool(weatherService);
 
     @Test
-    void shouldExposeFunctionDefinition() {
-        Map<String, Object> definition = weatherTool.getToolDefinition();
-
-        assertThat(definition.get("type")).isEqualTo("function");
-        assertThat(definition.toString()).contains(weatherTool.getToolName(), "city");
-    }
-
-    @Test
-    void shouldExecuteWeatherQueryWithValidatedCity() {
+    void shouldReturnWeatherForValidCity() {
         when(weatherService.getWeather("杭州")).thenReturn("杭州：晴，28°C");
 
-        String result = weatherTool.execute(weatherTool.getToolName(), "{\"city\":\" 杭州 \"}");
+        String result = weatherTool.getWeather("杭州");
 
         assertThat(result).isEqualTo("杭州：晴，28°C");
         verify(weatherService).getWeather("杭州");
     }
 
     @Test
-    void shouldRejectInvalidArguments() {
-        assertThat(weatherTool.execute(weatherTool.getToolName(), "{}"))
-                .contains("city 参数不能为空");
-        assertThat(weatherTool.execute(weatherTool.getToolName(), "not-json"))
-                .contains("不是有效的 JSON");
-        assertThat(weatherTool.execute("unknown_tool", "{}"))
-                .contains("不支持的工具");
+    void shouldTrimCityName() {
+        when(weatherService.getWeather("杭州")).thenReturn("杭州：晴，28°C");
+
+        String result = weatherTool.getWeather("  杭州 ");
+
+        assertThat(result).isEqualTo("杭州：晴，28°C");
+        verify(weatherService).getWeather("杭州");
+    }
+
+    @Test
+    void shouldRejectEmptyCity() {
+        String result = weatherTool.getWeather("");
+        assertThat(result).contains("city 参数不能为空");
+    }
+
+    @Test
+    void shouldRejectNullCity() {
+        String result = weatherTool.getWeather(null);
+        assertThat(result).contains("city 参数不能为空");
     }
 }

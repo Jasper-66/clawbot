@@ -3,6 +3,7 @@ package com.example.clawbot.tool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.web.client.RestTemplate;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -20,9 +21,8 @@ class GeocodeToSearchNearbyLinkTest {
     void shouldFindHotPotNearTiananmen() throws Exception {
         // ========== 步骤 1：geocode 解析地址 ==========
         GeocodeTool geocodeTool = new GeocodeTool(restTemplate);
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                geocodeTool, "amapApiKey", "92e400c1e798f45771fb47106f38c1b1");
-        String geocodeResult = geocodeTool.execute("geocode", "{\"place\":\"天安门\"}");
+        ReflectionTestUtils.setField(geocodeTool, "amapApiKey", "92e400c1e798f45771fb47106f38c1b1");
+        String geocodeResult = geocodeTool.geocode("天安门");
 
         System.out.println("=== geocode 返回 ===");
         System.out.println(geocodeResult);
@@ -44,12 +44,9 @@ class GeocodeToSearchNearbyLinkTest {
 
         // ========== 步骤 2：search_nearby 搜索周边 ==========
         SearchNearbyTool searchNearbyTool = new SearchNearbyTool(restTemplate);
-        // 注意：SearchNearbyTool 需要 amap.api.key，通过反射注入
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                searchNearbyTool, "amapApiKey", "92e400c1e798f45771fb47106f38c1b1");
+        ReflectionTestUtils.setField(searchNearbyTool, "amapApiKey", "92e400c1e798f45771fb47106f38c1b1");
 
-        String searchResult = searchNearbyTool.execute("search_nearby",
-                "{\"location\":\"" + location + "\",\"keywords\":\"火锅\"}");
+        String searchResult = searchNearbyTool.searchNearby(location, "火锅", null, null, null);
 
         System.out.println("=== search_nearby 返回 ===");
         System.out.println(searchResult);
