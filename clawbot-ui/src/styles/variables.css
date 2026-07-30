@@ -1,0 +1,18 @@
+:root {
+  --primary: #7c3aed;
+  --primary-light: #a78bfa;
+  --primary-lighter: #c4b5fd;
+  --primary-dark: #5b21b6;
+  --bg: #f8f7ff;
+  --bg-card: #ffffff;
+  --bg-sidebar: #6d28d9;
+  --text-primary: #1e1b4b;
+  --text-secondary: #6b7280;
+  --border: #e5e7eb;
+  --shadow: 0 1px 3px rgba(124, 58, 237, 0.1), 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 10px 15px rgba(124, 58, 237, 0.1), 0 4px 6px rgba(0, 0, 0, 0.05);
+  --radius: 12px;
+}
+
+/* Element Plus 紫色主题覆盖 */
+.el-menu--horizontal { border-bottom: none !important; }
