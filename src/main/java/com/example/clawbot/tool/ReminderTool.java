@@ -24,10 +24,10 @@ public class ReminderTool {
 
     private static final int MAX_CONTENT_LENGTH = 200;
 
-    @Tool(name = "create_reminder", description = "创建一次性定时提醒。用户没有提供明确的提醒时间时，应先询问用户，不要调用工具。")
+    @Tool(name = "create_reminder", description = "创建一次性定时提醒。当用户消息包含提醒意图且有明确时间（如'5分钟后提醒我'、'明天8点提醒我开会'）时，必须调用此工具。如果用户没有提供时间，先询问时间再调用。")
     public String createReminder(
             @ToolParam(description = "提醒内容，例如：带伞、喝水、参加会议") String content,
-            @ToolParam(description = "带时区的 ISO 8601 时间，例如：2026-07-23T08:00:00+08:00") String trigger_at,
+            @ToolParam(description = "提醒的绝对时间，必须是带时区的 ISO 8601 格式。如果是相对时间（如'5分钟后'），必须先计算出绝对时间再传入。示例：2026-07-30T10:30:00+08:00") String trigger_at,
             @ToolParam(required = false, description = "提醒方式，未指定时默认为 text，可选值：text、voice、both") String reminder_type,
             @ToolParam(required = false, description = "用户唯一标识") String user_id) {
 

@@ -14,7 +14,11 @@ class WeatherToolTest {
     private final WeatherTool weatherTool = new WeatherTool(weatherService);
 
     @Test
+<<<<<<< HEAD
     void shouldExecuteWeatherQueryWithValidCity() {
+=======
+    void shouldReturnWeatherForValidCity() {
+>>>>>>> main
         when(weatherService.getWeather("杭州")).thenReturn("杭州：晴，28°C");
 
         String result = weatherTool.getWeather("杭州");
@@ -24,10 +28,17 @@ class WeatherToolTest {
     }
 
     @Test
+<<<<<<< HEAD
     void shouldTrimCityAndExecute() {
         when(weatherService.getWeather("杭州")).thenReturn("杭州：晴，28°C");
 
         String result = weatherTool.getWeather(" 杭州 ");
+=======
+    void shouldTrimCityName() {
+        when(weatherService.getWeather("杭州")).thenReturn("杭州：晴，28°C");
+
+        String result = weatherTool.getWeather("  杭州 ");
+>>>>>>> main
 
         assertThat(result).isEqualTo("杭州：晴，28°C");
         verify(weatherService).getWeather("杭州");
@@ -35,6 +46,7 @@ class WeatherToolTest {
 
     @Test
     void shouldRejectEmptyCity() {
+<<<<<<< HEAD
         assertThat(weatherTool.getWeather(""))
                 .contains("city 参数不能为空");
         assertThat(weatherTool.getWeather(null))
@@ -46,5 +58,15 @@ class WeatherToolTest {
         String longCity = "A".repeat(51);
         assertThat(weatherTool.getWeather(longCity))
                 .contains("city 参数过长");
+=======
+        String result = weatherTool.getWeather("");
+        assertThat(result).contains("city 参数不能为空");
+    }
+
+    @Test
+    void shouldRejectNullCity() {
+        String result = weatherTool.getWeather(null);
+        assertThat(result).contains("city 参数不能为空");
+>>>>>>> main
     }
 }
