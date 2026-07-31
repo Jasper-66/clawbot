@@ -32,6 +32,9 @@ public class ResumePlatformConfig {
     /** 投递间隔最大秒数（防封） */
     private int maxApplyInterval = 5;
 
+    /** 浏览器是否无头模式（true=不显示浏览器窗口） */
+    private boolean browserHeadless = false;
+
     // getters / setters
     public String getProvider() { return provider; }
     public void setProvider(String provider) { this.provider = provider; }
@@ -49,4 +52,6 @@ public class ResumePlatformConfig {
     public void setMinApplyInterval(int minApplyInterval) { this.minApplyInterval = minApplyInterval; }
     public int getMaxApplyInterval() { return maxApplyInterval; }
     public void setMaxApplyInterval(int maxApplyInterval) { this.maxApplyInterval = maxApplyInterval; }
+    public boolean isBrowserHeadless() { return browserHeadless; }
+    public void setBrowserHeadless(boolean browserHeadless) { this.browserHeadless = browserHeadless; }
 }
