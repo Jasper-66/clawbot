@@ -70,4 +70,9 @@ public class MessageRepository {
                 metadata, now
         );
     }
+
+    public List<Map<String, Object>> findAllByConversationId(String conversationId) {
+        String sql = "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, id ASC";
+        return jdbcTemplate.queryForList(sql, conversationId);
+    }
 }

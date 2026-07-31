@@ -1,5 +1,8 @@
 package com.example.clawbot.service;
 
+import com.example.clawbot.resume.model.UserProfile;
+import com.example.clawbot.resume.service.ResumeOrchestrator;
+import com.example.clawbot.resume.service.ResumeParser;
 import com.github.wechat.ilink.sdk.ILinkClient;
 import com.github.wechat.ilink.sdk.core.config.ILinkConfig;
 import com.github.wechat.ilink.sdk.core.model.FileItem;
@@ -9,6 +12,7 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -33,6 +37,11 @@ public class WeChatBotService {
     private final FileSummaryService fileSummaryService;
     private final ReminderService reminderService;
     private final com.example.clawbot.tool.ReminderTool reminderTool;
+
+    @Lazy
+    private final ResumeParser resumeParser;
+    @Lazy
+    private final ResumeOrchestrator resumeOrchestrator;
 
     private ILinkClient client;
 
@@ -404,17 +413,126 @@ public class WeChatBotService {
     }
 
     private void handleFileMessage(String fromUser, MessageItem item, FileItem fileItem) {
+        String fileName = fileItem.getFile_name();
+        log.info("══════════ [思考] 收到文件消息: {} ══════════", fileName);
+        log.info("  发信人: {}", fromUser);
+
+        // 判断是否是简历文件
+        if (isResumeFile(fileName)) {
+            log.info("  → 检测到简历文件，走简历解析流程");
+            handleResumeFile(fromUser, item, fileName);
+        } else {
+            log.info("  → 普通文件，走文件摘要流程");
+            handleNormalFile(fromUser, item, fileItem);
+        }
+    }
+
+    /**
+     * 判断是否是简历文件（PDF/Word格式，且文件名可能包含"简历"、"resume"等关键词）
+     */
+    private boolean isResumeFile(String fileName) {
+        if (fileName == null) return false;
+        String lower = fileName.toLowerCase();
+
+        // 检查文件格式：支持PDF和Word
+        boolean isSupportedFormat = lower.endsWith(".pdf") || lower.endsWith(".docx") || lower.endsWith(".doc");
+
+        // 检查文件名是否包含简历相关关键词
+        boolean hasResumeKeyword = lower.contains("简历") || lower.contains("resume") || lower.contains("cv")
+                || lower.contains("求职") || lower.contains("应聘");
+
+        // 如果文件名包含简历关键词，或者是PDF/Word格式且文件名看起来像简历
+        // 规则：文件名包含"简历"/"resume"关键词，或者文件名格式类似"姓名-职位-简历"
+        return isSupportedFormat && (hasResumeKeyword || looksLikeResumeFileName(lower));
+    }
+
+    /**
+     * 检查文件名是否看起来像简历文件名（如：张三简历.pdf, Java开发-李四.docx）
+     */
+    private boolean looksLikeResumeFileName(String fileName) {
+        // 常见简历文件名模式：包含分隔符（-、_、.）的PDF/Word文件
+        // 如：张三-Java开发.pdf, 李四_前端工程师.docx
+        return (fileName.endsWith(".pdf") || fileName.endsWith(".docx"))
+                && (fileName.contains("-") || fileName.contains("_"))
+                && fileName.length() < 50; // 文件名不会太长
+    }
+
+    /**
+     * 处理简历文件：下载 → 解析 → 保存 → 通知用户
+     */
+    private void handleResumeFile(String fromUser, MessageItem item, String fileName) {
+        try {
+            client.sendTextWithTyping(fromUser, "正在解析简历，请稍候...", 500);
+
+            // 下载文件
+            byte[] fileBytes = client.downloadFileFromMessageItem(item);
+            log.info("  ├─ 简历文件下载完成 ({} bytes)", fileBytes.length);
+
+            // 调用ResumeParser解析简历
+            UserProfile profile = resumeParser.parseFromFile(fromUser, fileBytes, fileName);
+            log.info("  ├─ [观察] 简历解析完成: 姓名={}, 期望职位={}, 期望城市={}",
+                    profile.getName(), profile.getDesiredPosition(), profile.getDesiredCity());
+
+            // 构建成功回复
+            StringBuilder reply = new StringBuilder();
+            reply.append("✅ 简历解析成功！\n\n");
+            reply.append("📋 简历信息：\n");
+            if (profile.getName() != null && !profile.getName().isEmpty()) {
+                reply.append("• 姓名: ").append(profile.getName()).append("\n");
+            }
+            if (profile.getDesiredPosition() != null && !profile.getDesiredPosition().isEmpty()) {
+                reply.append("• 期望职位: ").append(profile.getDesiredPosition()).append("\n");
+            }
+            if (profile.getDesiredCity() != null && !profile.getDesiredCity().isEmpty()) {
+                reply.append("• 期望城市: ").append(profile.getDesiredCity()).append("\n");
+            }
+            if (profile.getSalaryRange() != null && !profile.getSalaryRange().isEmpty()) {
+                reply.append("• 期望薪资: ").append(profile.getSalaryRange()).append("\n");
+            }
+            if (profile.getExperienceYears() != null && profile.getExperienceYears() > 0) {
+                reply.append("• 工作经验: ").append(profile.getExperienceYears()).append("年\n");
+            }
+            if (profile.getEducation() != null && !profile.getEducation().isEmpty()) {
+                reply.append("• 学历: ").append(profile.getEducation()).append("\n");
+            }
+            if (profile.getSkills() != null && !profile.getSkills().isEmpty()) {
+                reply.append("• 技能: ").append(String.join(", ", profile.getSkills())).append("\n");
+            }
+            reply.append("\n💡 您可以说：\n");
+            reply.append("• 「帮我找工作」— 搜索匹配岗位\n");
+            reply.append("• 「帮我投简历」— 自动投递简历\n");
+            reply.append("• 「查看投递进度」— 查看投递记录");
+
+            sendReply(fromUser, reply.toString());
+            log.info("  └─ [最终结果] 简历解析结果已发送给用户");
+
+        } catch (Exception e) {
+            log.error("[异常] 简历文件处理失败 | 文件: {} | 用户: {} | 原因: {}",
+                    fileName, fromUser, e.getMessage(), e);
+            sendReply(fromUser, "抱歉，简历解析失败。请确保：\n" +
+                    "1. 文件是PDF或Word格式\n" +
+                    "2. 文件内容清晰可读\n" +
+                    "3. 文件未损坏\n\n" +
+                    "请重新发送简历文件，或直接告诉我您的求职意向。");
+        }
+    }
+
+    /**
+     * 处理普通文件：下载 → 提取文本 → LLM生成摘要
+     */
+    private void handleNormalFile(String fromUser, MessageItem item, FileItem fileItem) {
         log.info("[行动] 开始处理文件: {} → 下载 → 提取文本 → LLM生成摘要", fileItem.getFile_name());
         try {
             client.sendTextWithTyping(fromUser, "正在查看文件，请稍候...", 500);
             byte[] fileBytes = client.downloadFileFromMessageItem(item);
             log.info("  ├─ 文件下载完成 ({} bytes)", fileBytes.length);
-            //调用FileSummaryService来提取内容并生成摘要
+            // 调用FileSummaryService来提取内容并生成摘要
             String summary = fileSummaryService.summarizeFile(fileBytes, fileItem.getFile_name());
             log.info("  └─ [观察] 文件总结完成，生成摘要 ({}字符)", summary != null ? summary.length() : 0);
             sendReply(fromUser, summary);
         } catch (Exception e) {
-            log.error("[异常] 文件处理失败 | 文件: {} | 用户: {} | 原因: {} | 建议: 检查文件格式是否支持", fileItem.getFile_name(), fromUser, e.getMessage(), e);
+            log.error("[异常] 文件处理失败 | 文件: {} | 用户: {} | 原因: {} | 建议: 检查文件格式是否支持",
+                    fileItem.getFile_name(), fromUser, e.getMessage(), e);
             sendReply(fromUser, "抱歉，文件处理失败，请稍后再试。");
         }
     }

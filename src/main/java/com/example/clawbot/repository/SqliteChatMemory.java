@@ -104,7 +104,7 @@ public class SqliteChatMemory implements ChatMemory {
             case "USER" -> new UserMessage(content, List.of(), metadata);
             case "ASSISTANT" -> new AssistantMessage(content, metadata);
             case "SYSTEM" -> new SystemMessage(content);
-            case "TOOL_RESPONSE" -> new ToolResponseMessage(List.of(), metadata);
+            case "TOOL" -> new ToolResponseMessage(List.of(), metadata);
             default -> new UserMessage(content, List.of(), metadata);
         };
     }

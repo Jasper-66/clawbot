@@ -31,6 +31,10 @@ public class UserProfile {
     private Integer experienceYears;
     /** 最高学历：本科/硕士/博士等 */
     private String education;
+    /** 学校名称，如 "北京大学" */
+    private String school;
+    /** 学校层次：985/211/双一流/一本/二本/海外名校 等 */
+    private String schoolTier;
     /** 技能标签列表，如 ["Java", "Spring", "MySQL"] */
     private List<String> skills;
     /** 自我介绍/个人总结 */

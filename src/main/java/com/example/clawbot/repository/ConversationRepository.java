@@ -85,4 +85,13 @@ public class ConversationRepository {
                 now, conversationId
         );
     }
+
+    public List<Map<String, Object>> findAll() {
+        return jdbcTemplate.queryForList("SELECT * FROM conversations ORDER BY updated_at DESC");
+    }
+
+    public void deleteById(String id) {
+        jdbcTemplate.update("DELETE FROM messages WHERE conversation_id = ?", id);
+        jdbcTemplate.update("DELETE FROM conversations WHERE id = ?", id);
+    }
 }

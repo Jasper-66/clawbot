@@ -1,8 +1,10 @@
 package com.example.clawbot.service;
 
+import com.example.clawbot.knowledge.service.KnowledgeRetriever;
 import com.example.clawbot.repository.ConversationRepository;
 import com.example.clawbot.repository.MessageRepository;
 import com.example.clawbot.repository.SqliteChatMemory;
+import com.example.clawbot.repository.TokenUsageRepository;
 import com.example.clawbot.tool.GeocodeTool;
 import com.example.clawbot.tool.PlanRouteTool;
 import com.example.clawbot.tool.ReminderTool;
@@ -44,6 +46,8 @@ public class LlmService {
     private final ChatClient chatClient;
     private final ConversationRepository conversationRepository;
     private final MessageRepository messageRepository;
+    private final KnowledgeRetriever knowledgeRetriever;
+    private final TokenUsageRepository tokenUsageRepository;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private static final ZoneId DEFAULT_ZONE = ZoneId.of("Asia/Shanghai");
@@ -61,7 +65,8 @@ public class LlmService {
                       ChatClient.Builder chatClientBuilder,
                       ConversationRepository conversationRepository,
                       MessageRepository messageRepository,
-                      //注入我们写的工具
+                      KnowledgeRetriever knowledgeRetriever,
+                      TokenUsageRepository tokenUsageRepository,
                       SqliteChatMemory chatMemory,
                       WeatherTool weatherTool,
                       GeocodeTool geocodeTool,
@@ -74,6 +79,8 @@ public class LlmService {
         this.restTemplate = restTemplate;
         this.conversationRepository = conversationRepository;
         this.messageRepository = messageRepository;
+        this.knowledgeRetriever = knowledgeRetriever;
+        this.tokenUsageRepository = tokenUsageRepository;
         this.chatClient = chatClientBuilder
 
                 .defaultTools(
@@ -116,27 +123,49 @@ public class LlmService {
                 ? userMessage.substring(0, 100) + "..."
                 : userMessage;
         log.info("[行动] 向 DeepSeek API 发送对话请求 (model={})", chatClient != null ? "deepseek-v4-flash" : "unknown");
-        log.info("  请求内容: system提示词 + 7个Function Calling工具定义 + 对话历史 + 用户消息 \"{}\"", messagePreview);
-        log.info("  → LLM 可在本轮自动调用工具 (weather/reminder/nearby/route/geocode/tts/tarot)");
+        log.info("  请求内容: system提示词 + Function Calling工具定义 + 对话历史 + 用户消息 \"{}\"", messagePreview);
 
-        // ① 获取或创建会话ID（这步还是需要的）
+        // ① 获取或创建会话ID
         String conversationId = conversationRepository.getOrCreate(userId, userMessage);
 
         try {
-            // ② 使用 Fluent API（流式 API），Advisor 自动管记忆
-            String reply = chatClient.prompt()
-                    .system(buildSystemPrompt(userId))   // 设置系统提示此
-                    .user(userMessage)                    // 用户消息
-                    // 给记忆顾问传参：告诉她"我要存/取哪个会话的消息"
-                    // CHAT_MEMORY_CONVERSATION_ID_KEY 是 Spring AI 规定的常量 = "chat_memory_conversation_id"
+            // ② RAG 检索知识库
+            String ragContext = "";
+            try {
+                ragContext = knowledgeRetriever.retrieve(userMessage);
+                if (!ragContext.isEmpty()) {
+                    log.info("[RAG] 检索到相关知识内容 ({}字符)", ragContext.length());
+                }
+            } catch (Exception e) {
+                log.warn("[RAG] 知识库检索失败，继续正常对话: {}", e.getMessage());
+            }
+
+            // ③ 使用 Fluent API，Advisor 自动管记忆
+            var chatResponse = chatClient.prompt()
+                    .system(buildSystemPrompt(userId, ragContext))
+                    .user(userMessage)
                     .advisors(a -> a.param(
                             AbstractChatMemoryAdvisor.CHAT_MEMORY_CONVERSATION_ID_KEY,
                             conversationId
                     ))
-                    //执行调用（发送给AI）
                     .call()
-                    //去除ai的回复文本
-                    .content();
+                    .chatResponse();
+
+            String reply = chatResponse.getResult().getOutput().getText();
+
+            // ④ 记录 Token 消耗
+            try {
+                var usage = chatResponse.getMetadata().getUsage();
+                if (usage != null) {
+                    int promptTokens = usage.getPromptTokens() != null ? usage.getPromptTokens() : 0;
+                    int completionTokens = usage.getCompletionTokens() != null ? usage.getCompletionTokens() : 0;
+                    int totalTokens = usage.getTotalTokens() != null ? usage.getTotalTokens() : (promptTokens + completionTokens);
+                    tokenUsageRepository.record(conversationId, promptTokens, completionTokens, totalTokens, "deepseek");
+                    log.info("[Token] prompt={}, completion={}, total={}", promptTokens, completionTokens, totalTokens);
+                }
+            } catch (Exception e) {
+                log.warn("[Token] 记录token消耗失败: {}", e.getMessage());
+            }
 
             return reply != null ? reply.trim() : "抱歉，我没有生成有效回复，请稍后再试。";
         } catch (Exception e) {
@@ -145,13 +174,21 @@ public class LlmService {
         }
     }
 
-    private String buildSystemPrompt(String userId) {
+    private String buildSystemPrompt(String userId, String ragContext) {
         String currentTime = OffsetDateTime.now(DEFAULT_ZONE).toString();
-        return SYSTEM_PROMPT
+        String prompt = SYSTEM_PROMPT
                 + " 当前时间是 " + currentTime + "，当前时区是 Asia/Shanghai。"
                 + " 当前用户ID是 " + userId + "，调用需要 user_id 参数的工具时请传入此值。"
                 + " 创建提醒时必须把用户表达的时间转换为带时区的 ISO 8601 格式；"
                 + "如果用户没有提供明确时间，应先询问用户。";
+
+        if (ragContext != null && !ragContext.isEmpty()) {
+            prompt += "\n\n【知识库参考内容】\n以下是与用户问题相关的知识库内容，请参考这些信息来回答问题。"
+                    + "如果知识库中有相关内容，请优先引用并标注来源。如果知识库中没有相关内容，请根据你的知识回答。\n\n"
+                    + ragContext;
+        }
+
+        return prompt;
     }
 
     public String chatWithImage(String userId, byte[] imageBytes, String fileName) {
