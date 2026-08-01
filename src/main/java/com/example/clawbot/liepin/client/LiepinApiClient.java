@@ -16,7 +16,9 @@ import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -52,11 +54,18 @@ public class LiepinApiClient {
 
     /**
      * 搜索职位列表。
+     *
+     * @throws RuntimeException AUTH_EXPIRED 表示认证过期，调用方应给用户提示
      */
     public List<Job> searchJobs(String keyword, String city) {
         if (!config.isEnabled()) {
             log.warn("猎聘 MCP 未启用，返回空列表");
             return List.of();
+        }
+
+        // 检查 token 是否过期
+        if (isTokenExpired()) {
+            throw new RuntimeException("AUTH_EXPIRED");
         }
 
         try {
@@ -75,10 +84,11 @@ public class LiepinApiClient {
             List<Job> jobs = parseJobList(result);
             log.info("猎聘搜索成功: keyword={}, 结果数={}", keyword, jobs.size());
             return jobs;
-
+        } catch (RuntimeException e) {
+            throw e; // 透传 AUTH_EXPIRED 等业务异常
         } catch (Exception e) {
-            log.error("猎聘搜索失败: keyword={}, city={}, 原因={}", keyword, city, e.getMessage(), e);
-            return List.of();
+            log.error("猎聘搜索失败: keyword={}, city={}", keyword, city, e);
+            throw new RuntimeException("猎聘搜索失败: " + e.getMessage(), e);
         }
     }
 
@@ -86,7 +96,7 @@ public class LiepinApiClient {
      * 获取职位详情。
      */
     public Job getJobDetail(String jobId) {
-        if (!config.isEnabled()) return null;
+        if (!config.isEnabled() || isTokenExpired()) return null;
 
         try {
             JsonNode result = callMcpTool("user-search-job", Map.of("jobId", jobId));
@@ -103,7 +113,7 @@ public class LiepinApiClient {
      * 投递简历。
      */
     public boolean applyJob(String jobId, String jobKind) {
-        if (!config.isEnabled()) return false;
+        if (!config.isEnabled() || isTokenExpired()) return false;
 
         try {
             JsonNode result = callMcpTool("user-apply-job", Map.of(
@@ -123,7 +133,7 @@ public class LiepinApiClient {
      * 获取我的简历。
      */
     public String getMyResume() {
-        if (!config.isEnabled()) return null;
+        if (!config.isEnabled() || isTokenExpired()) return null;
 
         try {
             JsonNode result = callMcpTool("my-resume", Map.of());
@@ -132,6 +142,34 @@ public class LiepinApiClient {
         } catch (Exception e) {
             log.error("猎聘简历获取失败: 原因={}", e.getMessage(), e);
             return null;
+        }
+    }
+
+    /**
+     * 检查 JWT token 是否已过期。
+     */
+    private boolean isTokenExpired() {
+        String token = config.getToken();
+        if (token == null || token.isBlank()) {
+            return true;
+        }
+        try {
+            String[] parts = token.split("\\.");
+            if (parts.length < 2) return false; // 非 JWT 格式，跳过检查
+            String payload = new String(Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
+            JsonNode payloadJson = objectMapper.readTree(payload);
+            if (payloadJson.has("exp")) {
+                long exp = payloadJson.get("exp").asLong();
+                boolean expired = Instant.now().getEpochSecond() >= exp;
+                if (expired) {
+                    log.warn("猎聘 MCP token 已过期: exp={}, now={}", Instant.ofEpochSecond(exp), Instant.now());
+                }
+                return expired;
+            }
+            return false;
+        } catch (Exception e) {
+            log.debug("JWT 解析失败，跳过过期检查: {}", e.getMessage());
+            return false;
         }
     }
 
@@ -186,7 +224,18 @@ public class LiepinApiClient {
         }
 
         if (root.has("result")) {
-            return root.get("result");
+            JsonNode resultNode = root.get("result");
+            // 检查 MCP 工具调用是否返回错误
+            if (resultNode.has("isError") && resultNode.get("isError").asBoolean()) {
+                String errorMsg = resultNode.path("content").path(0).path("text").asText("未知错误");
+                log.error("猎聘 MCP 工具执行失败: {}", errorMsg);
+                // 检测 401 错误，给出明确提示
+                if (errorMsg.contains("401") || errorMsg.contains("Unauthorized")) {
+                    throw new RuntimeException("AUTH_EXPIRED");
+                }
+                throw new RuntimeException("猎聘 MCP 工具执行失败: " + errorMsg);
+            }
+            return resultNode;
         }
         return root;
     }
@@ -263,8 +312,9 @@ public class LiepinApiClient {
 
         if (responseCode == 401) {
             initialized = false;
-            log.error("MCP 认证失败 (401)。请到 https://www.liepin.com/mcp/auth 重新生成凭证，" +
-                    "将生成的 liepinUserToken 配置到 mcp.liepin.token");
+            log.error("MCP 认证失败 (401)，endpoint={}", endpoint);
+            log.error("  响应体: {}", responseBody != null && responseBody.length() > 500 ? responseBody.substring(0, 500) : responseBody);
+            log.error("请到 https://www.liepin.com/mcp/auth 确认 token 有效，并更新 mcp.liepin.token");
         } else if (responseCode >= 400) {
             log.warn("MCP HTTP {}: {}", responseCode,
                     responseBody != null && responseBody.length() > 200 ? responseBody.substring(0, 200) : responseBody);
@@ -293,7 +343,10 @@ public class LiepinApiClient {
         if (token != null && !token.isBlank()) {
             String authValue = useBearerPrefix ? "Bearer " + token : token;
             conn.setRequestProperty("Authorization", authValue);
+            log.debug("MCP 请求 Authorization: {}", authValue.substring(0, Math.min(30, authValue.length())) + "...");
         }
+        log.debug("MCP 请求 endpoint={}, sessionId={}", endpoint, sessionId);
+        log.debug("MCP 请求 body: {}", body.length() > 300 ? body.substring(0, 300) + "..." : body);
         conn.setDoOutput(true);
         conn.setConnectTimeout(15000);
         conn.setReadTimeout(30000);
@@ -303,11 +356,13 @@ public class LiepinApiClient {
 
         int responseCode = conn.getResponseCode();
         lastResponseCode = responseCode;
+        log.debug("MCP 响应 code={}, url={}", responseCode, endpoint);
 
         // 从响应头中提取 session ID
         String newSessionId = conn.getHeaderField("Mcp-Session-Id");
         if (newSessionId != null && !newSessionId.isBlank()) {
             sessionId = newSessionId;
+            log.debug("MCP 会话 ID: {}", sessionId);
         }
 
         String responseBody;
