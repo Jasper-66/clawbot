@@ -47,7 +47,7 @@ public class KnowledgeService {
         doc = documentRepository.save(doc);
 
         // 2. 文本分片
-        TokenTextSplitter splitter = new TokenTextSplitter(200, 50, 10, 10000, true);
+        TokenTextSplitter splitter = new TokenTextSplitter(200, 50, 10, 10000, true, List.of());
         List<Document> documents = splitter.split(new Document(content, Map.of(
                 "docId", doc.getId().toString(),
                 "title", title,

@@ -38,6 +38,9 @@ class ApplicationRecordRepositoryTest {
         ApplicationRecord record = ApplicationRecord.builder()
                 .recordId("record-1")
                 .userId("user-1")
+                .jobId("84541619")
+                .applicationId("LP-1001")
+                .platform("liepin")
                 .jobTitle("Java开发")
                 .company("示例公司")
                 .salary("20k-30k")
@@ -55,6 +58,7 @@ class ApplicationRecordRepositoryTest {
                 .singleElement()
                 .usingRecursiveComparison()
                 .isEqualTo(record);
+        assertThat(repository.existsByUserIdAndJobId("user-1", "84541619")).isTrue();
 
         assertThat(repository.updateStatus(
                 "record-1", "INTERVIEW", "2026-07-31T10:00:00+08:00"

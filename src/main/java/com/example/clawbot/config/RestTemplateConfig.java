@@ -7,15 +7,15 @@ import org.springframework.web.client.RestTemplate;
 
 import java.time.Duration;
 
-// RestTemplate Bean 配置，提供 HTTP 客户端
+/** 提供统一超时设置的 HTTP 客户端。 */
 @Configuration
 public class RestTemplateConfig {
 
     @Bean
     public RestTemplate restTemplate(RestTemplateBuilder builder) {
         return builder
-                .setConnectTimeout(Duration.ofSeconds(10))
-                .setReadTimeout(Duration.ofSeconds(60))
+                .connectTimeout(Duration.ofSeconds(10))
+                .readTimeout(Duration.ofSeconds(60))
                 .build();
     }
 }

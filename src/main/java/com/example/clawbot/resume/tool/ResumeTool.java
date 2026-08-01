@@ -1,6 +1,5 @@
 package com.example.clawbot.resume.tool;
 
-import com.example.clawbot.resume.model.ApplicationResult;
 import com.example.clawbot.resume.service.ResumeOrchestrator;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -11,21 +10,17 @@ import org.springframework.stereotype.Component;
 
 import java.util.Map;
 
-// LLM 可调用的简历投递工具 — 微信用户说"帮我投简历"时由 DeepSeek Function Calling 触发
-// 本类只做参数校验+日志，核心逻辑全部委托给 ResumeOrchestrator
+/** 暴露给模型的岗位搜索和投递工具。 */
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class ResumeTool {
 
-    private final ResumeOrchestrator orchestrator;  // 成员7
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ResumeOrchestrator orchestrator;
+    private final ObjectMapper objectMapper;
 
-    // ═══════════════════════════════════════════════════
-    // 工具1: 搜索岗位
-    // ════════════════
-    // ═══════════════════════════════════
-    @Tool(name = "search_jobs", description = "搜索匹配的招聘信息。用户问有什么合适的工作、帮我找找工作时调用。")
+    @Tool(name = "search_jobs",
+            description = "按岗位关键词和城市搜索猎聘职位，并保存本次结果。用户查询工作或岗位时调用。")
     public String searchJobs(
             @ToolParam(description = "岗位关键词，如 Java开发、产品经理") String keyword,
             @ToolParam(description = "城市名称，如 北京、上海") String city,
@@ -38,7 +33,7 @@ public class ResumeTool {
             return error("请指定城市名称");
         }
         String effectiveUserId = user_id != null ? user_id.trim() : "unknown_user";
-        log.info("[行动] LLM调用工具: search_jobs → 成员7 编排搜索流程");
+        log.info("[行动] LLM调用工具: search_jobs");
 
         try {
             String result = orchestrator.searchJobs(effectiveUserId, keyword.trim(), city.trim());
@@ -50,11 +45,9 @@ public class ResumeTool {
         }
     }
 
-    // ═══════════════════════════════════════════════════
-    // 工具2: 一键自动投递（核心）
-    // ═══════════════════════════════════════════════════
-    @Tool(name = "auto_apply", description = "自动投递简历。当用户表达了求职意图（想找XX工作、帮我投简历）时调用此工具。")
-    public String autoApply(
+    @Tool(name = "prepare_job_application",
+            description = "准备投递但不真正提交。支持“投1号”“投1和3号”“全部投递”；优先使用用户最近一次 search_jobs 的结果。")
+    public String prepareApplication(
             @ToolParam(description = "用户原始消息，包含完整求职需求（期望岗位、城市、薪资等）") String user_message,
             @ToolParam(required = false, description = "用户唯一标识") String user_id) {
 
@@ -62,35 +55,45 @@ public class ResumeTool {
             return error("请提供求职需求描述");
         }
         String effectiveUserId = user_id != null ? user_id.trim() : "unknown_user";
-        log.info("[行动] LLM调用工具: auto_apply → 成员7 全流程自动投递 (Step1~7)");
+        log.info("[行动] LLM调用工具: prepare_job_application");
         log.info("  用户原始需求: \"{}\"", user_message.length() > 100
                 ? user_message.substring(0, 100) + "..." : user_message);
 
         try {
-            ApplicationResult result = orchestrator.autoApply(effectiveUserId, user_message.trim());
-            String formatted = formatApplyResult(result);
-            log.info("[最终结果] 投递成功: company={}, job={}, matchScore={}",
-                    result.getJobListing().getCompany(), result.getJobListing().getTitle(), result.getMatchScore());
-            return formatted;
-        } catch (UnsupportedOperationException e) {
-            log.warn("[观察] 投递功能尚未实现: {}", e.getMessage());
-            return error("投递功能开发中，敬请期待！");
+            return orchestrator.prepareApplication(effectiveUserId, user_message.trim());
         } catch (Exception e) {
-            log.error("[异常] 投递失败 | 用户: {} | 原因: {} | 建议: 检查各成员模块是否正常",
+            log.error("[异常] 准备投递失败 | 用户: {} | 原因: {}",
+                    effectiveUserId, e.getMessage(), e);
+            return error("准备投递失败: " + e.getMessage());
+        }
+    }
+
+    @Tool(name = "confirm_job_application",
+            description = "仅当用户看到待确认清单后明确确认时调用，执行该用户最新的待确认投递任务。")
+    public String confirmApplication(
+            @ToolParam(description = "当前微信用户的唯一标识") String user_id) {
+
+        if (user_id == null || user_id.isBlank()) {
+            return error("缺少用户标识，无法查找待确认任务");
+        }
+        String effectiveUserId = user_id.trim();
+
+        try {
+            log.info("[行动] LLM调用工具: confirm_job_application | 用户: {}", effectiveUserId);
+            return orchestrator.confirmApplication(effectiveUserId);
+        } catch (Exception e) {
+            log.error("[异常] 确认投递失败 | 用户: {} | 原因: {}",
                     effectiveUserId, e.getMessage(), e);
             return error("投递失败: " + e.getMessage());
         }
     }
 
-    // ═══════════════════════════════════════════════════
-    // 工具3: 查询投递进度
-    // ═══════════════════════════════════════════════════
     @Tool(name = "get_application_progress", description = "查询求职投递进度。用户问投了多少家、求职进度怎么样时调用。")
     public String getApplicationProgress(
             @ToolParam(required = false, description = "用户唯一标识") String user_id) {
 
         String effectiveUserId = user_id != null ? user_id.trim() : "unknown_user";
-        log.info("[行动] LLM调用工具: get_application_progress → 成员7 查询投递记录");
+        log.info("[行动] LLM调用工具: get_application_progress");
 
         try {
             String result = orchestrator.getApplicationProgress(effectiveUserId);
@@ -100,25 +103,6 @@ public class ResumeTool {
             log.error("[异常] 查询投递进度失败 | 用户: {} | 原因: {}", effectiveUserId, e.getMessage(), e);
             return error("查询失败: " + e.getMessage());
         }
-    }
-
-    /**
-     * 格式化投递结果为微信可读文本。
-     *
-     * 【被谁调用】autoApply() 成功后
-     * 【返回值】  含emoji的格式化投递成功文本
-     */
-    private String formatApplyResult(ApplicationResult result) {
-        return String.format(
-                "✅ 投递成功！\n📋 %s @ %s\n💰 %s\n📍 %s\n📊 匹配度: %d分\n%s\n%s",
-                result.getJobListing().getTitle(),
-                result.getJobListing().getCompany(),
-                result.getJobListing().getSalary(),
-                result.getJobListing().getCity(),
-                result.getMatchScore(),
-                result.getOptimizationTip() != null ? "💡 " + result.getOptimizationTip() : "",
-                result.getApplicationId() != null ? "🎫 投递编号：" + result.getApplicationId() : ""
-        );
     }
 
     private String error(String message) {

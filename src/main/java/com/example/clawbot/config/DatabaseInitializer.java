@@ -6,6 +6,7 @@ import com.example.clawbot.repository.MessageRepository;
 import com.example.clawbot.repository.ReminderRepository;
 import com.example.clawbot.repository.TokenUsageRepository;
 import com.example.clawbot.resume.repository.ApplicationRecordRepository;
+import com.example.clawbot.resume.repository.ApplicationSessionRepository;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -24,6 +25,7 @@ public class DatabaseInitializer {
     private final TokenUsageRepository tokenUsageRepository;
     private final JdbcTemplate jdbcTemplate;
     private final ApplicationRecordRepository applicationRecordRepository;
+    private final ApplicationSessionRepository applicationSessionRepository;
 
     @PostConstruct
     public void init() {
@@ -35,6 +37,7 @@ public class DatabaseInitializer {
         tokenUsageRepository.createTable();
         createUserProfilesTable();
         applicationRecordRepository.createTable();
+        applicationSessionRepository.createTable();
         log.info("数据库表初始化完成");
     }
 

@@ -48,16 +48,13 @@ public class MatchScorerImpl implements MatchScorer {
 
     @Override
     //批量评分并排序。
-    public Map<JobListing, Integer> scoreAndRank(UserProfile profile, List<JobListing> jobs, int minScore) {
-        log.info("批量评分: 用户={}, 岗位数={}, 最低分={}", profile.getName(), jobs.size(), minScore);
+    public Map<JobListing, Integer> scoreAndRank(UserProfile profile, List<JobListing> jobs) {
+        log.info("批量评分: 用户={}, 岗位数={}", profile.getName(), jobs.size());
 
         Map<JobListing, Integer> scoredJobs = new LinkedHashMap<>();
 
         for (JobListing job : jobs) {
-            int score = score(profile, job);
-            if (score >= minScore) {
-                scoredJobs.put(job, score);
-            }
+            scoredJobs.put(job, score(profile, job));
         }
 
         // 按分数降序排列
@@ -70,7 +67,7 @@ public class MatchScorerImpl implements MatchScorer {
                         LinkedHashMap::new
                 ));
 
-        log.info("评分完成: 原始{}个岗位, 过滤后{}个(>={}分)", jobs.size(), sorted.size(), minScore);
+        log.info("评分完成: {}个岗位", sorted.size());
         return sorted;
     }
 

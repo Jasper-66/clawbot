@@ -98,7 +98,7 @@ public class WeChatBotService {
                 //client.getUpdates()主动向微信服务器拉取新消息
                 List<WeixinMessage> messages = client.getUpdates();
                 if (!messages.isEmpty()) {
-                    log.debug("[轮询] 拉取到 {} 条新消息", messages.size());
+                    //log.debug("[轮询] 拉取到 {} 条新消息", messages.size());
                 }
                 for (WeixinMessage msg : messages) {
                     Long msgId = msg.getMessage_id();
@@ -687,9 +687,9 @@ public class WeChatBotService {
         }
 
         List<ReminderService.ReminderTask> dueTasks = reminderService.getDueReminders();
-        log.info("[定时扫描] 检查到期提醒... 共 {} 条待发送", dueTasks.size());
+        //log.info("[定时扫描] 检查到期提醒... 共 {} 条待发送", dueTasks.size());
         if (!dueTasks.isEmpty()) {
-            log.info("[定时扫描] 发现 {} 条到期提醒，开始发送", dueTasks.size());
+            //log.info("[定时扫描] 发现 {} 条到期提醒，开始发送", dueTasks.size());
         }
 
         for (ReminderService.ReminderTask task : dueTasks) {

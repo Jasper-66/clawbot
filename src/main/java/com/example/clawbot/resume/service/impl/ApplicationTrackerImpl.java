@@ -49,6 +49,9 @@ public class ApplicationTrackerImpl implements ApplicationTracker {
         ApplicationRecord record = ApplicationRecord.builder()
                 .recordId(UUID.randomUUID().toString())
                 .userId(userId.trim())
+                .jobId(job.getJobId())
+                .applicationId(result.getApplicationId())
+                .platform(job.getPlatform())
                 .jobTitle(job.getTitle())
                 .company(job.getCompany())
                 .salary(job.getSalary())
@@ -64,17 +67,6 @@ public class ApplicationTrackerImpl implements ApplicationTracker {
         log.info("投递记录已保存: recordId={}, userId={}, status={}",
                 record.getRecordId(), record.getUserId(), record.getStatus());
         return record;
-    }
-
-    @Override
-    @Transactional
-    public int recordBatch(List<ApplicationResult> results, String userId) {
-        validateUserId(userId);
-        if (results == null || results.isEmpty()) {
-            return 0;
-        }
-        results.forEach(result -> record(result, userId));
-        return results.size();
     }
 
     @Override

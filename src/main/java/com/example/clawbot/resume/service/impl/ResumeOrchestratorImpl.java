@@ -3,88 +3,83 @@ package com.example.clawbot.resume.service.impl;
 import com.example.clawbot.resume.client.ApplicationClient;
 import com.example.clawbot.resume.client.JobSearchClient;
 import com.example.clawbot.resume.model.*;
+import com.example.clawbot.resume.repository.ApplicationSessionRepository;
+import com.example.clawbot.resume.repository.ApplicationSessionRepository.PendingApplication;
+import com.example.clawbot.resume.repository.ApplicationSessionRepository.PendingJob;
+import com.example.clawbot.resume.repository.ApplicationSessionRepository.RecentSearch;
 import com.example.clawbot.resume.service.*;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-// ── 成员7: 流程编排实现 ──
-// 这是整个简历投递模块的"指挥家"，串联成员1~6
+// 串联简历、岗位匹配、投递和记录保存。
 @Slf4j
 @Service
 public class ResumeOrchestratorImpl implements ResumeOrchestrator {
 
-    // 注入成员1~6的接口（Spring会自动注入实现类）
-    private final ResumeParser resumeParser;            // 成员1
-    private final JobSearchClient jobSearchClient;      // 成员2
-    private final MatchScorer matchScorer;              // 成员3
-    private final ResumeOptimizer resumeOptimizer;      // 成员4
-    private final ApplicationClient applicationClient;  // 成员5
-    private final ApplicationTracker applicationTracker;// 成员6
+    private static final long PENDING_TTL_MILLIS = 15 * 60 * 1000L;
+    private static final long SEARCH_TTL_MILLIS = 15 * 60 * 1000L;
+    private static final int MAX_DISPLAYED_JOBS = 5;
+    private static final Pattern INDEX_PATTERN = Pattern.compile("\\d+");
 
-    // 使用@Lazy注解打破循环依赖
+    private final ResumeParser resumeParser;
+    private final JobSearchClient jobSearchClient;
+    private final MatchScorer matchScorer;
+    private final ApplicationClient applicationClient;
+    private final ApplicationTracker applicationTracker;
+    private final ApplicationSessionRepository applicationSessionRepository;
+
     public ResumeOrchestratorImpl(
             ResumeParser resumeParser,
             JobSearchClient jobSearchClient,
             MatchScorer matchScorer,
-            @Lazy ResumeOptimizer resumeOptimizer,
             ApplicationClient applicationClient,
-            ApplicationTracker applicationTracker) {
+            ApplicationTracker applicationTracker,
+            ApplicationSessionRepository applicationSessionRepository) {
         this.resumeParser = resumeParser;
         this.jobSearchClient = jobSearchClient;
         this.matchScorer = matchScorer;
-        this.resumeOptimizer = resumeOptimizer;
         this.applicationClient = applicationClient;
         this.applicationTracker = applicationTracker;
+        this.applicationSessionRepository = applicationSessionRepository;
     }
 
-    // 存储待确认的投递任务：key=pendingId, value=PendingApplication
-    private final ConcurrentHashMap<String, PendingApplication> pendingApplications = new ConcurrentHashMap<>();
-
-    // 待确认投递任务的内部数据结构
-    private record PendingApplication(
-            String userId,
-            UserProfile profile,
-            JobListing job,
-            int matchScore,
-            String optimizationTip,
-            long createdAt
-    ) {}
-
-    // ═══════════════════════════════════════════════════
-    // 方法1: 搜索岗位
-    // ═══════════════════════════════════════════════════
     @Override
     public String searchJobs(String userId, String keyword, String city) {
-        log.info("[成员7] searchJobs 开始 | 用户: {} | 关键词: {} | 城市: {}", userId, keyword, city);
+        log.info("搜索岗位 | 用户: {} | 关键词: {} | 城市: {}", userId, keyword, city);
 
-        // Step1: 从 ResumeParser 获取用户简历/求职意向
         UserProfile profile = resumeParser.getProfile(userId);
         String experience = profile != null && profile.getExperienceYears() != null
                 ? profile.getExperienceYears() + "年" : "不限";
         String salary = profile != null ? profile.getSalaryRange() : "不限";
 
-        // Step2: 调用 JobSearchClient 搜索岗位
         List<JobListing> jobs = jobSearchClient.searchJobs(keyword, city, experience, salary);
-        log.info("[成员7] 搜索到 {} 个岗位", jobs.size());
+        log.info("搜索到 {} 个岗位", jobs.size());
 
-        // Step3: 若结果为空 → 返回提示
         if (jobs.isEmpty()) {
+            applicationSessionRepository.deleteRecentSearch(userId);
             return "🔍 当前条件未找到匹配岗位，请调整搜索条件后重试。\n\n💡 建议：\n1. 尝试更宽泛的关键词\n2. 扩大搜索城市范围\n3. 调整薪资期望";
         }
 
-        // Step4: 取前5个岗位，格式化为微信可读文本
         StringBuilder sb = new StringBuilder();
         sb.append("📋 为您找到以下岗位：\n\n");
 
-        int limit = Math.min(5, jobs.size());
+        int limit = Math.min(MAX_DISPLAYED_JOBS, jobs.size());
+        List<JobListing> displayedJobs = List.copyOf(jobs.subList(0, limit));
+        applicationSessionRepository.saveRecentSearch(
+                userId,
+                keyword,
+                city,
+                displayedJobs,
+                System.currentTimeMillis()
+        );
         for (int i = 0; i < limit; i++) {
-            JobListing job = jobs.get(i);
+            JobListing job = displayedJobs.get(i);
             sb.append(String.format("%d. %s @ %s\n", i + 1, job.getTitle(), job.getCompany()));
             sb.append(String.format("   💰 %s | 📍 %s\n", job.getSalary(), job.getCity()));
             if (job.getExperienceRequired() != null) {
@@ -93,189 +88,121 @@ public class ResumeOrchestratorImpl implements ResumeOrchestrator {
             sb.append("\n");
         }
 
-        if (jobs.size() > 5) {
-            sb.append(String.format("... 还有 %d 个岗位，可使用「自动投递」功能智能匹配\n", jobs.size() - 5));
+        if (jobs.size() > MAX_DISPLAYED_JOBS) {
+            sb.append(String.format("... 还有 %d 个岗位未展示\n", jobs.size() - MAX_DISPLAYED_JOBS));
         }
 
-        sb.append("\n💡 您可以说「帮我投简历」来自动投递匹配的岗位");
+        sb.append("\n💡 回复“投1号”“投1和3号”或“全部投递”即可生成待确认清单。");
 
-        log.info("[成员7] searchJobs 完成，返回 {} 字符", sb.length());
+        log.info("岗位搜索完成，返回 {} 字符", sb.length());
         return sb.toString();
     }
 
-    // ═══════════════════════════════════════════════════
-    // 方法2: 一键自动投递（核心方法）
-    // ═══════════════════════════════════════════════════
     @Override
-    public ApplicationResult autoApply(String userId, String userMessage) {
-        log.info("[成员7] autoApply 开始 | 用户: {} | 消息: {}", userId, userMessage);
-
-        // ═══ Step1: 获取或解析用户简历 ═══
-        log.info("[成员7] Step1: 获取用户简历");
+    public String prepareApplication(String userId, String userMessage) {
         UserProfile profile = resumeParser.getProfile(userId);
-        if (profile == null) {
-            log.info("[成员7] 用户无已存简历，从消息中解析");
-            profile = resumeParser.parseFromMessage(userId, userMessage);
-            profile = resumeParser.saveProfile(profile);
-            log.info("[成员7] 简历解析并保存成功: 姓名={}, 期望职位={}", profile.getName(), profile.getDesiredPosition());
-        } else {
-            log.info("[成员7] 使用已存简历: 姓名={}, 期望职位={}", profile.getName(), profile.getDesiredPosition());
+
+        if (isRecentSelectionRequest(userMessage)) {
+            RecentSearch recentSearch = getValidRecentSearch(userId);
+            if (recentSearch == null) {
+                return "没有找到最近15分钟内的岗位列表，请先搜索岗位，再回复“投1号”或“全部投递”。";
+            }
+            if (profile == null) {
+                profile = minimalProfile(userId, recentSearch);
+            }
+            List<JobListing> selectedJobs = selectJobs(recentSearch.jobs(), userMessage);
+            return createPendingApplication(userId, profile, selectedJobs);
         }
 
-        // ═══ Step2: 搜索匹配岗位 ═══
-        log.info("[成员7] Step2: 搜索匹配岗位");
-        String keyword = profile.getDesiredPosition() != null ? profile.getDesiredPosition() : extractKeyword(userMessage);
-        String city = profile.getDesiredCity() != null ? profile.getDesiredCity() : extractCity(userMessage);
-        String experience = profile.getExperienceYears() != null ? profile.getExperienceYears() + "年" : "不限";
-        String salary = profile.getSalaryRange() != null ? profile.getSalaryRange() : "不限";
+        if (profile == null) {
+            profile = resumeParser.parseFromMessage(userId, userMessage);
+        }
+
+        String keyword = hasText(profile.getDesiredPosition())
+                ? profile.getDesiredPosition()
+                : extractKeyword(userMessage);
+        String city = hasText(profile.getDesiredCity())
+                ? profile.getDesiredCity()
+                : extractCity(userMessage);
+        String experience = profile.getExperienceYears() != null
+                ? profile.getExperienceYears() + "年"
+                : "不限";
+        String salary = profile.getSalaryRange() != null
+                ? profile.getSalaryRange()
+                : "不限";
 
         List<JobListing> jobs = jobSearchClient.searchJobs(keyword, city, experience, salary);
-        log.info("[成员7] 搜索到 {} 个岗位", jobs.size());
-
         if (jobs.isEmpty()) {
-            throw new RuntimeException("未找到匹配岗位，建议调整搜索条件。您可以说「搜索 Java开发 北京」来手动搜索");
+            return "未找到匹配岗位，请调整岗位关键词或城市后重试。";
         }
 
-        // ═══ Step3: 匹配评分并筛选 ═══
-        log.info("[成员7] Step3: 人岗匹配评分");
-        Map<JobListing, Integer> scoredJobs = matchScorer.scoreAndRank(profile, jobs, 60);
-        log.info("[成员7] 评分完成，{} 个岗位匹配度>=60", scoredJobs.size());
+        Map<JobListing, Integer> scoredJobs = matchScorer.scoreAndRank(profile, jobs);
 
-        if (scoredJobs.isEmpty()) {
-            throw new RuntimeException("未找到足够匹配的岗位（匹配度均低于60分），建议优化简历或调整求职方向");
-        }
-
-        // 取匹配度最高的岗位
         Map.Entry<JobListing, Integer> bestMatch = scoredJobs.entrySet().iterator().next();
-        JobListing targetJob = bestMatch.getKey();
+        JobListing job = bestMatch.getKey();
         int matchScore = bestMatch.getValue();
-        log.info("[成员7] 最佳匹配: {} @ {} | 匹配度: {}分", targetJob.getTitle(), targetJob.getCompany(), matchScore);
 
-        // ═══ Step4: 生成简历优化建议 ═══
-        log.info("[成员7] Step4: 生成简历优化建议");
-        String optimizationTip = resumeOptimizer.generateOptimizationTip(profile, targetJob);
-        log.info("[成员7] 优化建议生成完成: {} 字符", optimizationTip.length());
-
-        // ═══ Step5: 检查是否已投递 ═══
-        boolean hasApplied = jobSearchClient.hasApplied(targetJob.getJobId(), userId);
-        if (hasApplied) {
-            log.info("[成员7] 用户已投递过该岗位，跳过投递");
-            return ApplicationResult.builder()
-                    .success(false)
-                    .jobListing(targetJob)
-                    .matchScore(matchScore)
-                    .optimizationTip(optimizationTip)
-                    .message("您已投递过该岗位，无需重复投递")
-                    .build();
+        if (jobSearchClient.hasApplied(job.getJobId(), userId)) {
+            return String.format("您已经投递过 %s @ %s，请选择其他岗位。",
+                    job.getTitle(), job.getCompany());
         }
 
-        // ═══ Step6: 执行投递 ═══
-        log.info("[成员7] Step6: 执行投递");
-        ApplicationResult result = applicationClient.apply(targetJob, profile);
-        result.setMatchScore(matchScore);
-        result.setOptimizationTip(optimizationTip);
+        String pendingId = UUID.randomUUID().toString();
+        List<PendingJob> pendingJobs = List.of(new PendingJob(job, matchScore));
+        applicationSessionRepository.savePendingApplication(
+                new PendingApplication(
+                        pendingId,
+                        userId,
+                        profile,
+                        pendingJobs,
+                        System.currentTimeMillis()
+                )
+        );
 
-        if (result.isSuccess()) {
-            // ═══ Step7: 记录投递 ═══
-            log.info("[成员7] Step7: 记录投递");
-            result.setAppliedAt(LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
-            applicationTracker.record(result, userId);
-            log.info("[成员7] 投递记录已保存");
-        }
-
-        log.info("[成员7] autoApply 完成 | 成功: {} | 岗位: {} @ {}",
-                result.isSuccess(), targetJob.getTitle(), targetJob.getCompany());
-        return result;
+        return formatPendingApplication(pendingJobs);
     }
 
-    // ═══════════════════════════════════════════════════
-    // 方法3: 批量投递
-    // ═══════════════════════════════════════════════════
     @Override
-    public String batchApply(String userId, String userMessage, int maxCount) {
-        log.info("[成员7] batchApply 开始 | 用户: {} | 最大数量: {}", userId, maxCount);
-
-        // ═══ Step1: 获取用户简历 ═══
-        UserProfile profile = resumeParser.getProfile(userId);
-        if (profile == null) {
-            profile = resumeParser.parseFromMessage(userId, userMessage);
-            profile = resumeParser.saveProfile(profile);
+    public String confirmApplication(String userId) {
+        PendingApplication pending = applicationSessionRepository
+                .findLatestPendingApplication(userId)
+                .orElse(null);
+        if (pending == null) {
+            return "❌ 未找到待确认任务，请重新搜索岗位。";
+        }
+        if (System.currentTimeMillis() - pending.createdAt() > PENDING_TTL_MILLIS) {
+            applicationSessionRepository.deletePendingApplication(pending.pendingId());
+            return "❌ 待确认任务已超过15分钟，请重新搜索岗位。";
         }
 
-        // ═══ Step2: 搜索匹配岗位 ═══
-        String keyword = profile.getDesiredPosition() != null ? profile.getDesiredPosition() : extractKeyword(userMessage);
-        String city = profile.getDesiredCity() != null ? profile.getDesiredCity() : extractCity(userMessage);
-        String experience = profile.getExperienceYears() != null ? profile.getExperienceYears() + "年" : "不限";
-        String salary = profile.getSalaryRange() != null ? profile.getSalaryRange() : "不限";
-
-        List<JobListing> jobs = jobSearchClient.searchJobs(keyword, city, experience, salary);
-        if (jobs.isEmpty()) {
-            return "❌ 未找到匹配岗位，建议调整搜索条件";
-        }
-
-        // ═══ Step3: 匹配评分并筛选 ═══
-        Map<JobListing, Integer> scoredJobs = matchScorer.scoreAndRank(profile, jobs, 60);
-        if (scoredJobs.isEmpty()) {
-            return "❌ 未找到足够匹配的岗位（匹配度均低于60分）";
-        }
-
-        // 取前N个匹配岗位
-        List<Map.Entry<JobListing, Integer>> topJobs = scoredJobs.entrySet().stream()
-                .limit(maxCount)
-                .toList();
-
-        log.info("[成员7] 将批量投递 {} 个岗位", topJobs.size());
-
-        // ═══ Step4: 批量投递 ═══
-        List<JobListing> jobsToApply = topJobs.stream()
-                .map(Map.Entry::getKey)
-                .toList();
-
-        List<ApplicationResult> results = applicationClient.batchApply(jobsToApply, profile);
-
-        // 设置匹配分数
-        for (int i = 0; i < results.size(); i++) {
-            results.get(i).setMatchScore(topJobs.get(i).getValue());
-            if (results.get(i).isSuccess()) {
-                results.get(i).setAppliedAt(LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+        List<ApplicationResult> results = new ArrayList<>();
+        for (PendingJob pendingJob : pending.jobs()) {
+            JobListing job = pendingJob.job();
+            if (jobSearchClient.hasApplied(job.getJobId(), userId)) {
+                results.add(failedApplication(job, "您已经投递过该岗位"));
+                continue;
             }
-        }
 
-        // ═══ Step5: 记录投递 ═══
-        int recorded = applicationTracker.recordBatch(results, userId);
-        log.info("[成员7] 批量投递记录已保存: {} 条", recorded);
-
-        // ═══ Step6: 格式化返回结果 ═══
-        long successCount = results.stream().filter(ApplicationResult::isSuccess).count();
-        long failCount = results.size() - successCount;
-
-        StringBuilder sb = new StringBuilder();
-        sb.append(String.format("📊 批量投递完成：成功 %d 个，失败 %d 个\n\n", successCount, failCount));
-
-        for (int i = 0; i < results.size(); i++) {
-            ApplicationResult result = results.get(i);
-            JobListing job = topJobs.get(i).getKey();
-            int score = topJobs.get(i).getValue();
-
+            ApplicationResult result = applicationClient.apply(job, pending.profile());
+            result.setMatchScore(pendingJob.matchScore());
             if (result.isSuccess()) {
-                sb.append(String.format("✅ %d. %s @ %s (匹配度: %d分)\n", i + 1, job.getTitle(), job.getCompany(), score));
-            } else {
-                sb.append(String.format("❌ %d. %s @ %s - %s\n", i + 1, job.getTitle(), job.getCompany(), result.getMessage()));
+                result.setAppliedAt(LocalDateTime.now()
+                        .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+                applicationTracker.record(result, userId);
             }
+            results.add(result);
         }
-
-        log.info("[成员7] batchApply 完成");
-        return sb.toString();
+        if (results.stream().allMatch(ApplicationResult::isSuccess)) {
+            applicationSessionRepository.deletePendingApplication(pending.pendingId());
+        }
+        return formatApplicationResults(results);
     }
 
-    // ═══════════════════════════════════════════════════
-    // 方法4: 查询投递进度
-    // ═══════════════════════════════════════════════════
+    /** 查询投递统计和最近记录。 */
     @Override
     public String getApplicationProgress(String userId) {
-        log.info("[成员7] getApplicationProgress 开始 | 用户: {}", userId);
+        log.info("查询投递进度 | 用户: {}", userId);
 
-        // Step1: 获取统计数据
         Map<String, Integer> stats = applicationTracker.getStatistics(userId);
         int total = stats.getOrDefault("total", 0);
         int viewed = stats.getOrDefault("viewed", 0);
@@ -284,10 +211,8 @@ public class ResumeOrchestratorImpl implements ResumeOrchestrator {
         int offer = stats.getOrDefault("offer", 0);
         int pending = total - viewed - interview - rejected - offer;
 
-        // Step2: 获取最近投递记录
         List<ApplicationRecord> records = applicationTracker.getRecords(userId);
 
-        // Step3: 格式化输出
         StringBuilder sb = new StringBuilder();
         sb.append("📊 求职进度：\n");
         sb.append(String.format("总投递: %d | 已查看: %d | 面试: %d | 待定: %d\n",
@@ -316,25 +241,198 @@ public class ResumeOrchestratorImpl implements ResumeOrchestrator {
             sb.append("\n暂无投递记录，您可以说「帮我投简历」开始求职");
         }
 
-        log.info("[成员7] getApplicationProgress 完成");
+        log.info("投递进度查询完成");
         return sb.toString();
     }
 
-    // ═══════════════════════════════════════════════════
-    // 方法5: 用户确认交互
-    // ═══════════════════════════════════════════════════
-    @Override
-    public boolean requestUserConfirmation(String userId, JobListing job, int matchScore) {
-        // 这个方法在当前架构中不直接使用，确认流程通过LLM Function Calling实现
-        // 返回true表示已发送确认请求
-        log.info("[成员7] requestUserConfirmation | 用户: {} | 岗位: {} @ {} | 匹配度: {}",
-                userId, job.getTitle(), job.getCompany(), matchScore);
-        return true;
+    private String createPendingApplication(
+            String userId,
+            UserProfile profile,
+            List<JobListing> selectedJobs
+    ) {
+        List<PendingJob> pendingJobs = new ArrayList<>();
+        for (JobListing job : selectedJobs) {
+            if (jobSearchClient.hasApplied(job.getJobId(), userId)) {
+                continue;
+            }
+            int matchScore = matchScorer.score(profile, job);
+            pendingJobs.add(new PendingJob(job, matchScore));
+        }
+
+        if (pendingJobs.isEmpty()) {
+            return "所选岗位均已投递过，请重新选择其他岗位。";
+        }
+
+        String pendingId = UUID.randomUUID().toString();
+        applicationSessionRepository.savePendingApplication(
+                new PendingApplication(
+                        pendingId,
+                        userId,
+                        profile,
+                        List.copyOf(pendingJobs),
+                        System.currentTimeMillis()
+                )
+        );
+        return formatPendingApplication(pendingJobs);
     }
 
-    // ═══════════════════════════════════════════════════
-    // 辅助方法
-    // ═══════════════════════════════════════════════════
+    private String formatPendingApplication(List<PendingJob> pendingJobs) {
+        StringBuilder result = new StringBuilder();
+        result.append(String.format("请确认是否投递以下%d个岗位：\n\n", pendingJobs.size()));
+        for (int index = 0; index < pendingJobs.size(); index++) {
+            PendingJob pendingJob = pendingJobs.get(index);
+            JobListing job = pendingJob.job();
+            result.append(String.format(
+                    "%d. %s @ %s\n   💰 %s | 📍 %s | 📊 %d分\n",
+                    index + 1,
+                    job.getTitle(),
+                    job.getCompany(),
+                    job.getSalary(),
+                    job.getCity(),
+                    pendingJob.matchScore()
+            ));
+        }
+        result.append("\n回复“确认投递”后才会真正提交，15分钟内有效。");
+        return result.toString();
+    }
+
+    private String formatApplicationResults(List<ApplicationResult> results) {
+        if (results.size() == 1) {
+            ApplicationResult result = results.get(0);
+            JobListing job = result.getJobListing();
+            if (!result.isSuccess()) {
+                return String.format(
+                        "❌ 投递失败：%s @ %s\n原因：%s",
+                        job.getTitle(),
+                        job.getCompany(),
+                        result.getMessage()
+                );
+            }
+            return String.format(
+                    "✅ 投递成功！\n📋 %s @ %s\n💰 %s\n📍 %s\n📊 匹配度：%d分%s",
+                    job.getTitle(),
+                    job.getCompany(),
+                    job.getSalary(),
+                    job.getCity(),
+                    result.getMatchScore(),
+                    hasText(result.getApplicationId())
+                            ? "\n🎫 投递编号：" + result.getApplicationId()
+                            : ""
+            );
+        }
+
+        long successCount = results.stream().filter(ApplicationResult::isSuccess).count();
+        StringBuilder summary = new StringBuilder(String.format(
+                "📊 批量投递完成：成功 %d 个，失败 %d 个\n\n",
+                successCount,
+                results.size() - successCount
+        ));
+        for (int index = 0; index < results.size(); index++) {
+            ApplicationResult result = results.get(index);
+            JobListing job = result.getJobListing();
+            summary.append(String.format(
+                    "%s %d. %s @ %s%s\n",
+                    result.isSuccess() ? "✅" : "❌",
+                    index + 1,
+                    job.getTitle(),
+                    job.getCompany(),
+                    result.isSuccess() ? "" : "：" + result.getMessage()
+            ));
+        }
+        return summary.toString().trim();
+    }
+
+    private RecentSearch getValidRecentSearch(String userId) {
+        RecentSearch recentSearch = applicationSessionRepository
+                .findRecentSearch(userId)
+                .orElse(null);
+        if (recentSearch == null) {
+            return null;
+        }
+        if (System.currentTimeMillis() - recentSearch.createdAt() > SEARCH_TTL_MILLIS) {
+            applicationSessionRepository.deleteRecentSearch(userId);
+            return null;
+        }
+        return recentSearch;
+    }
+
+    private boolean isRecentSelectionRequest(String message) {
+        String normalized = message == null ? "" : message.replaceAll("\\s+", "");
+        if (isAllSelection(normalized)) {
+            return true;
+        }
+        boolean wantsToApply = normalized.contains("投") || normalized.contains("申请");
+        if (!wantsToApply) {
+            return false;
+        }
+        return INDEX_PATTERN.matcher(normalized).find()
+                || normalized.contains("第")
+                || normalized.matches(".*[一二三四五六七八九十]号.*");
+    }
+
+    private List<JobListing> selectJobs(List<JobListing> jobs, String message) {
+        String normalized = message.replaceAll("\\s+", "");
+        if (isAllSelection(normalized)) {
+            return jobs;
+        }
+
+        Set<Integer> indexes = new LinkedHashSet<>();
+        Matcher matcher = INDEX_PATTERN.matcher(normalized);
+        while (matcher.find()) {
+            indexes.add(Integer.parseInt(matcher.group()));
+        }
+
+        String[] chineseNumbers = {"一", "二", "三", "四", "五", "六", "七", "八", "九", "十"};
+        for (int index = 0; index < chineseNumbers.length; index++) {
+            String number = chineseNumbers[index];
+            if (normalized.contains("第" + number)
+                    || normalized.contains(number + "号")) {
+                indexes.add(index + 1);
+            }
+        }
+
+        if (indexes.isEmpty()) {
+            throw new IllegalArgumentException("请说明要投递的岗位编号，例如“投1号”或“全部投递”");
+        }
+
+        List<JobListing> selected = new ArrayList<>();
+        for (Integer index : indexes) {
+            if (index < 1 || index > jobs.size()) {
+                throw new IllegalArgumentException(
+                        "岗位编号" + index + "不存在，当前列表共有" + jobs.size() + "个岗位"
+                );
+            }
+            selected.add(jobs.get(index - 1));
+        }
+        return selected;
+    }
+
+    private boolean isAllSelection(String message) {
+        return message.contains("全部")
+                || message.contains("所有")
+                || message.contains("都投")
+                || message.contains("全投");
+    }
+
+    private UserProfile minimalProfile(String userId, RecentSearch search) {
+        return UserProfile.builder()
+                .userId(userId)
+                .name("")
+                .desiredPosition(search.keyword())
+                .desiredCity(search.city())
+                .salaryRange("")
+                .experienceYears(0)
+                .education("")
+                .skills(new ArrayList<>())
+                .summary("")
+                .workHistory(new ArrayList<>())
+                .projectHistory(new ArrayList<>())
+                .build();
+    }
+
+    private boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
 
     /**
      * 从用户消息中提取岗位关键词
@@ -374,5 +472,14 @@ public class ResumeOrchestratorImpl implements ResumeOrchestrator {
             case "OFFER" -> "🎉";
             default -> "⏳";
         };
+    }
+
+    private ApplicationResult failedApplication(JobListing job, String message) {
+        return ApplicationResult.builder()
+                .success(false)
+                .jobListing(job)
+                .status("FAILED")
+                .message(message)
+                .build();
     }
 }

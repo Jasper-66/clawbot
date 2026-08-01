@@ -37,7 +37,8 @@ public class MultiChatModelConfig {
     public OpenAiChatModel deepSeekChatModel(
             @Value("${deepseek.api.key}") String apiKey,
             @Value("${deepseek.api.base-url}") String baseUrl,
-            @Value("${deepseek.api.model}") String model) {
+            @Value("${deepseek.api.model}") String model,
+            @Value("${deepseek.api.max-tokens:4096}") Integer maxTokens) {
         return OpenAiChatModel.builder()
                 .openAiApi(OpenAiApi.builder()
                         .baseUrl(baseUrl)
@@ -47,7 +48,7 @@ public class MultiChatModelConfig {
                 .defaultOptions(OpenAiChatOptions.builder()
                         .model(model)
                         .temperature(0.7)
-                        .maxTokens(1024)
+                        .maxTokens(maxTokens)
                         .build())
                 .build();
     }

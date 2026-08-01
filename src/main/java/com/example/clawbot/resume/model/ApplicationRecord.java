@@ -15,6 +15,12 @@ public class ApplicationRecord {
     private String recordId;
     /** 用户ID */
     private String userId;
+    /** 招聘平台岗位ID，用于避免重复投递 */
+    private String jobId;
+    /** 平台返回的投递ID */
+    private String applicationId;
+    /** 招聘平台 */
+    private String platform;
     /** 岗位名称 */
     private String jobTitle;
     /** 公司名称 */

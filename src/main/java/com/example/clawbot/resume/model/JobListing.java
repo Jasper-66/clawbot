@@ -13,6 +13,10 @@ import lombok.NoArgsConstructor;
 public class JobListing {
     /** 岗位ID（平台侧） */
     private String jobId;
+    /** 猎聘投递需要的岗位类型编号 */
+    private String jobKind;
+    /** 岗位来源平台 */
+    private String platform;
     /** 岗位名称，如 "高级Java开发工程师" */
     private String title;
     /** 公司名称 */

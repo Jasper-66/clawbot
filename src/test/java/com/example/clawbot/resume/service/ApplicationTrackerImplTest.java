@@ -78,13 +78,11 @@ class ApplicationTrackerImplTest {
     }
 
     @Test
-    void shouldSaveBatchAndCalculateStatistics() {
-        tracker.recordBatch(List.of(
-                result(true, "SUBMITTED", "Java开发"),
-                result(true, "VIEWED", "后端开发"),
-                result(true, "INTERVIEW", "平台开发"),
-                result(false, null, "服务端开发")
-        ), "user-1");
+    void shouldCalculateStatistics() {
+        tracker.record(result(true, "SUBMITTED", "Java开发"), "user-1");
+        tracker.record(result(true, "VIEWED", "后端开发"), "user-1");
+        tracker.record(result(true, "INTERVIEW", "平台开发"), "user-1");
+        tracker.record(result(false, null, "服务端开发"), "user-1");
 
         Map<String, Integer> statistics = tracker.getStatistics("user-1");
         assertThat(statistics).containsEntry("total", 4);

@@ -21,6 +21,9 @@ public class ApplicationRecordRepository {
             CREATE TABLE IF NOT EXISTS application_records (
                 record_id   TEXT PRIMARY KEY,
                 user_id     TEXT NOT NULL,
+                job_id      TEXT,
+                application_id TEXT,
+                platform    TEXT,
                 job_title   TEXT NOT NULL,
                 company     TEXT,
                 salary      TEXT,
@@ -32,6 +35,9 @@ public class ApplicationRecordRepository {
                 remark      TEXT
             )
             """);
+        addColumnIfMissing("job_id", "TEXT");
+        addColumnIfMissing("application_id", "TEXT");
+        addColumnIfMissing("platform", "TEXT");
         jdbcTemplate.execute("""
             CREATE INDEX IF NOT EXISTS idx_application_records_user_time
                 ON application_records(user_id, applied_at DESC)
@@ -40,17 +46,25 @@ public class ApplicationRecordRepository {
             CREATE INDEX IF NOT EXISTS idx_application_records_user_status
                 ON application_records(user_id, status)
             """);
+        jdbcTemplate.execute("""
+            CREATE INDEX IF NOT EXISTS idx_application_records_user_job
+                ON application_records(user_id, job_id)
+            """);
     }
 
     public void insert(ApplicationRecord record) {
         jdbcTemplate.update("""
                 INSERT INTO application_records (
-                    record_id, user_id, job_title, company, salary, city,
-                    status, match_score, applied_at, updated_at, remark
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    record_id, user_id, job_id, application_id, platform,
+                    job_title, company, salary, city, status, match_score,
+                    applied_at, updated_at, remark
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 record.getRecordId(),
                 record.getUserId(),
+                record.getJobId(),
+                record.getApplicationId(),
+                record.getPlatform(),
                 record.getJobTitle(),
                 record.getCompany(),
                 record.getSalary(),
@@ -61,6 +75,17 @@ public class ApplicationRecordRepository {
                 record.getUpdatedAt(),
                 record.getRemark()
         );
+    }
+
+    public boolean existsByUserIdAndJobId(String userId, String jobId) {
+        if (userId == null || userId.isBlank() || jobId == null || jobId.isBlank()) {
+            return false;
+        }
+        Integer count = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM application_records
+                WHERE user_id = ? AND job_id = ?
+                """, Integer.class, userId.trim(), jobId.trim());
+        return count != null && count > 0;
     }
 
     public List<ApplicationRecord> findByUserId(String userId) {
@@ -92,6 +117,9 @@ public class ApplicationRecordRepository {
         return ApplicationRecord.builder()
                 .recordId(resultSet.getString("record_id"))
                 .userId(resultSet.getString("user_id"))
+                .jobId(resultSet.getString("job_id"))
+                .applicationId(resultSet.getString("application_id"))
+                .platform(resultSet.getString("platform"))
                 .jobTitle(resultSet.getString("job_title"))
                 .company(resultSet.getString("company"))
                 .salary(resultSet.getString("salary"))
@@ -102,5 +130,18 @@ public class ApplicationRecordRepository {
                 .updatedAt(resultSet.getString("updated_at"))
                 .remark(resultSet.getString("remark"))
                 .build();
+    }
+
+    private void addColumnIfMissing(String columnName, String columnType) {
+        List<String> columns = jdbcTemplate.query(
+                "PRAGMA table_info(application_records)",
+                (resultSet, rowNumber) -> resultSet.getString("name")
+        );
+        if (!columns.contains(columnName)) {
+            jdbcTemplate.execute(
+                    "ALTER TABLE application_records ADD COLUMN "
+                            + columnName + " " + columnType
+            );
+        }
     }
 }

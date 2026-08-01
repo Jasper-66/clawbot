@@ -25,6 +25,4 @@ public class ApplicationResult {
     private String appliedAt;
     /** 匹配评分（0~100） */
     private Integer matchScore;
-    /** 简历优化建议（AI生成的针对该岗位的简历调整建议） */
-    private String optimizationTip;
 }

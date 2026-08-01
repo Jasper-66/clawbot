@@ -8,7 +8,6 @@ import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
-import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
@@ -34,6 +33,10 @@ public class SqliteChatMemory implements ChatMemory {
     public void add(String conversationId, List<Message> messages) {
         String now = OffsetDateTime.now(ZONE).toString();
         for (Message message : messages) {
+            String content = message.getText();
+            if (content == null || content.isBlank()) {
+                continue;
+            }
             // ① 把 metadata（Map）转成 JSON 字符串存进去
             String metadataJson = null;
             try {
@@ -48,7 +51,7 @@ public class SqliteChatMemory implements ChatMemory {
                     "INSERT INTO messages (conversation_id, role, content, message_type, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                     conversationId,
                     message.getMessageType().name().toLowerCase(),
-                    message.getText() != null ? message.getText() : "",
+                    content,
                     "text",
                     metadataJson,
                     now
@@ -58,10 +61,16 @@ public class SqliteChatMemory implements ChatMemory {
     }
 
     @Override
+    public List<Message> get(String conversationId) {
+        return get(conversationId, 20);
+    }
+
     public List<Message> get(String conversationId, int lastN) {
         String sql = """
             SELECT role, content, metadata FROM messages
             WHERE conversation_id = ?
+              AND role IN ('user', 'assistant', 'system')
+              AND TRIM(content) <> ''
             ORDER BY created_at DESC, id DESC
             LIMIT ?
             """;
@@ -101,11 +110,10 @@ public class SqliteChatMemory implements ChatMemory {
         }
         // ② 根据角色创建不同类型的 Message 对象
         return switch (role.toUpperCase()) {
-            case "USER" -> new UserMessage(content, List.of(), metadata);
-            case "ASSISTANT" -> new AssistantMessage(content, metadata);
+            case "USER" -> UserMessage.builder().text(content).metadata(metadata).build();
+            case "ASSISTANT" -> AssistantMessage.builder().content(content).properties(metadata).build();
             case "SYSTEM" -> new SystemMessage(content);
-            case "TOOL" -> new ToolResponseMessage(List.of(), metadata);
-            default -> new UserMessage(content, List.of(), metadata);
+            default -> UserMessage.builder().text(content).metadata(metadata).build();
         };
     }
 }

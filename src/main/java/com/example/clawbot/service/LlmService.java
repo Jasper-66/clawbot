@@ -17,9 +17,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.client.advisor.AbstractChatMemoryAdvisor;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
+import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.mcp.SyncMcpToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -75,7 +76,8 @@ public class LlmService {
                       TextToSpeechTool textToSpeechTool,
                       ReminderTool reminderTool,
                       TarotTool tarotTool,
-                      ResumeTool resumeTool) {
+                      ResumeTool resumeTool,
+                      SyncMcpToolCallbackProvider mcpToolCallbackProvider) {
         this.restTemplate = restTemplate;
         this.conversationRepository = conversationRepository;
         this.messageRepository = messageRepository;
@@ -93,6 +95,7 @@ public class LlmService {
                         tarotTool,
                         resumeTool
                 )
+                .defaultToolCallbacks(mcpToolCallbackProvider.getToolCallbacks())
                 //关键：配置记忆顾问（秘书）
                 .defaultAdvisors(
                         MessageChatMemoryAdvisor.builder(chatMemory).build())
@@ -115,7 +118,12 @@ public class LlmService {
                     + "如果用户没有要求语音，不要主动调用 text_to_speech 工具。\n"
                     + "【重要规则-提醒】当用户要求设置提醒、定时提醒时，你必须调用 create_reminder 或 create_periodic_reminder 工具。"
                     + "绝对不要自己编造'已设置成功'的回复，只有工具返回 success=true 才算设置成功。"
-                    + "如果用户没有提供明确时间，先询问用户。";
+                    + "如果用户没有提供明确时间，先询问用户。\n"
+                    + "【重要规则-求职】查询岗位时必须调用本地 search_jobs，查询简历时调用 my-resume。"
+                    + "用户说“投1号”“投1和3号”或“全部投递”时，必须将用户这句话原样传给 "
+                    + "prepare_job_application，使用最近一次 search_jobs 的岗位结果生成待确认清单，不能直接投递。"
+                    + "只有用户在看到待确认信息后明确回复“确认投递”，才能调用 confirm_job_application；确认工具只需传当前用户ID。"
+                    + "批量投递也必须先展示完整待确认清单并获得一次明确确认，不得自行确认或编造投递成功结果。";
 
     public String chat(String userId, String userMessage) {
         long startTime = System.currentTimeMillis();
@@ -145,7 +153,7 @@ public class LlmService {
                     .system(buildSystemPrompt(userId, ragContext))
                     .user(userMessage)
                     .advisors(a -> a.param(
-                            AbstractChatMemoryAdvisor.CHAT_MEMORY_CONVERSATION_ID_KEY,
+                            ChatMemory.CONVERSATION_ID,
                             conversationId
                     ))
                     .call()
@@ -167,7 +175,11 @@ public class LlmService {
                 log.warn("[Token] 记录token消耗失败: {}", e.getMessage());
             }
 
-            return reply != null ? reply.trim() : "抱歉，我没有生成有效回复，请稍后再试。";
+            if (reply == null || reply.isBlank()) {
+                log.warn("[观察] LLM 返回空内容，未生成文本或工具调用");
+                return "AI 没有完成本次操作，请重新发送刚才的消息；涉及投递时可先查询投递进度，避免重复操作。";
+            }
+            return reply.trim();
         } catch (Exception e) {
             log.error("ChatClient 调用失败", e);
             return "抱歉，我暂时无法处理，请稍后再试。";

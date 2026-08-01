@@ -18,6 +18,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.mcp.SyncMcpToolCallbackProvider;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.mock.http.client.MockClientHttpRequest;
@@ -87,12 +88,16 @@ class LlmServiceFunctionCallingTest {
         KnowledgeRetriever knowledgeRetriever = mock(KnowledgeRetriever.class);
         TokenUsageRepository tokenUsageRepository = mock(TokenUsageRepository.class);
         SqliteChatMemory chatMemory = mock(SqliteChatMemory.class);
+        SyncMcpToolCallbackProvider mcpTools = mock(SyncMcpToolCallbackProvider.class);
+        when(mcpTools.getToolCallbacks()).thenReturn(
+                new org.springframework.ai.tool.ToolCallback[0]
+        );
 
         llmService = new LlmService(
                 restTemplate, chatClientBuilder, conversationRepository, messageRepository,
                 knowledgeRetriever, tokenUsageRepository, chatMemory,
                 weatherTool, geocodeTool, searchNearbyTool, planRouteTool,
-                textToSpeechTool, reminderTool, tarotTool, null);
+                textToSpeechTool, reminderTool, tarotTool, null, mcpTools);
 
         // 通过反射注入配置值（避免依赖 Spring 容器和 application.properties）
         ReflectionTestUtils.setField(llmService, "visionApiKey", "test-key");

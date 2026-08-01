@@ -353,16 +353,4 @@ public class SpeechService {
         return null;
     }
 
-    private String getMimeType(String fileName) {
-        if (fileName == null) return "audio/wav";
-        String lower = fileName.toLowerCase();
-        if (lower.endsWith(".mp3")) return "audio/mpeg";
-        if (lower.endsWith(".wav")) return "audio/wav";
-        if (lower.endsWith(".amr")) return "audio/amr";
-        if (lower.endsWith(".sil")) return "audio/silk";
-        if (lower.endsWith(".ogg") || lower.endsWith(".opus")) return "audio/ogg";
-        if (lower.endsWith(".m4a")) return "audio/mp4";
-        if (lower.endsWith(".flac")) return "audio/flac";
-        return "audio/wav";
-    }
 }
