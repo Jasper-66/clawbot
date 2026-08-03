@@ -46,6 +46,13 @@ public class ResumeOrchestratorImpl implements ResumeOrchestrator {
     // 存储待确认的投递任务：key=pendingId, value=PendingApplication
     private final ConcurrentHashMap<String, PendingApplication> pendingApplications = new ConcurrentHashMap<>();
 
+    // 存储搜索结果缓存：key=userId, value=最近搜索到的岗位列表
+    private final ConcurrentHashMap<String, List<JobListing>> searchResultCache = new ConcurrentHashMap<>();
+    // 存储搜索结果缓存的时间戳：key=userId, value=搜索时间(毫秒)
+    private final ConcurrentHashMap<String, Long> searchResultTimestamp = new ConcurrentHashMap<>();
+    // 搜索缓存有效期：10分钟（避免使用过旧的缓存数据）
+    private static final long SEARCH_CACHE_TTL_MS = 10 * 60 * 1000L;
+
     // 待确认投递任务的内部数据结构
     private record PendingApplication(
             String userId,
@@ -97,7 +104,12 @@ public class ResumeOrchestratorImpl implements ResumeOrchestrator {
             sb.append(String.format("... 还有 %d 个岗位，可使用「自动投递」功能智能匹配\n", jobs.size() - 5));
         }
 
-        sb.append("\n💡 您可以说「帮我投简历」来自动投递匹配的岗位");
+        sb.append("\n💡 您可以说「帮我投简历」来自动投递匹配的岗位，或者说「投第1个」「投前3个」从搜索结果中选择投递");
+
+        // 缓存搜索结果，供后续 applyFromSearch 使用
+        searchResultCache.put(userId, jobs);
+        searchResultTimestamp.put(userId, System.currentTimeMillis());
+        log.info("[成员7] 搜索结果已缓存，共 {} 个岗位，缓存时间戳已更新", jobs.size());
 
         log.info("[成员7] searchJobs 完成，返回 {} 字符", sb.length());
         return sb.toString();
@@ -136,13 +148,13 @@ public class ResumeOrchestratorImpl implements ResumeOrchestrator {
             throw new RuntimeException("未找到匹配岗位，建议调整搜索条件。您可以说「搜索 Java开发 北京」来手动搜索");
         }
 
-        // ═══ Step3: 匹配评分并筛选 ═══
+        // ═══ Step3: 匹配评分并筛选（不设门槛，全部参与排序）═══
         log.info("[成员7] Step3: 人岗匹配评分");
-        Map<JobListing, Integer> scoredJobs = matchScorer.scoreAndRank(profile, jobs, 60);
-        log.info("[成员7] 评分完成，{} 个岗位匹配度>=60", scoredJobs.size());
+        Map<JobListing, Integer> scoredJobs = matchScorer.scoreAndRank(profile, jobs, 0);
+        log.info("[成员7] 评分完成，{} 个岗位参与排序", scoredJobs.size());
 
         if (scoredJobs.isEmpty()) {
-            throw new RuntimeException("未找到足够匹配的岗位（匹配度均低于60分），建议优化简历或调整求职方向");
+            throw new RuntimeException("未找到匹配岗位，建议调整搜索条件。您可以说「搜索 Java开发 北京」来手动搜索");
         }
 
         // 取匹配度最高的岗位
@@ -269,7 +281,112 @@ public class ResumeOrchestratorImpl implements ResumeOrchestrator {
     }
 
     // ═══════════════════════════════════════════════════
-    // 方法4: 查询投递进度
+    // 方法4: 从搜索结果中投递指定岗位
+    // ═══════════════════════════════════════════════════
+    @Override
+    public String applyFromSearch(String userId, List<Integer> indices, Integer count) {
+        log.info("[成员7] applyFromSearch 开始 | 用户: {} | indices={} | count={}", userId, indices, count);
+
+        // Step1: 从缓存获取搜索结果，并校验缓存时效性
+        List<JobListing> cachedJobs = searchResultCache.get(userId);
+        Long cachedAt = searchResultTimestamp.get(userId);
+
+        if (cachedJobs == null || cachedJobs.isEmpty()) {
+            return "❌ 没有找到最近的搜索结果，请先搜索岗位（如「帮我看看河北的Java岗位」）";
+        }
+
+        // 校验缓存时效性：超过10分钟的缓存不允许使用，避免用户看到的列表与实际缓存不一致
+        if (cachedAt == null || (System.currentTimeMillis() - cachedAt) > SEARCH_CACHE_TTL_MS) {
+            log.warn("[成员7] 搜索缓存已过期（缓存时间: {}ms前），拒绝使用旧缓存",
+                    cachedAt != null ? (System.currentTimeMillis() - cachedAt) : "未知");
+            return "⚠️ 搜索结果已超过10分钟，为避免投递错误岗位，请重新搜索后再投递。\n\n您可以说「帮我看看xx的xx岗位」来重新搜索。";
+        }
+
+        log.info("[成员7] 搜索缓存有效（{}ms前），共 {} 个岗位",
+                System.currentTimeMillis() - cachedAt, cachedJobs.size());
+        // 打印前3个岗位信息，便于调试确认缓存内容是否正确
+        for (int i = 0; i < Math.min(3, cachedJobs.size()); i++) {
+            JobListing j = cachedJobs.get(i);
+            log.info("[成员7]   缓存岗位#{}: {} @ {} | {}", i + 1, j.getTitle(), j.getCompany(), j.getCity());
+        }
+
+        // Step2: 确定要投递的岗位
+        List<JobListing> jobsToApply = new ArrayList<>();
+        List<Integer> invalidIndices = new ArrayList<>();
+
+        if (count != null && count > 0) {
+            // 投前 N 个
+            int end = Math.min(count, cachedJobs.size());
+            for (int i = 0; i < end; i++) {
+                jobsToApply.add(cachedJobs.get(i));
+            }
+        } else if (indices != null && !indices.isEmpty()) {
+            // 投指定序号（从1开始）
+            for (int idx : indices) {
+                if (idx >= 1 && idx <= cachedJobs.size()) {
+                    jobsToApply.add(cachedJobs.get(idx - 1));
+                } else {
+                    invalidIndices.add(idx);
+                }
+            }
+        }
+
+        if (jobsToApply.isEmpty()) {
+            if (!invalidIndices.isEmpty()) {
+                return String.format("❌ 序号 %s 超出范围，当前搜索结果只有 %d 个岗位",
+                        invalidIndices, cachedJobs.size());
+            }
+            return "❌ 没有找到符合条件的岗位，请检查序号是否正确";
+        }
+
+        log.info("[成员7] 选择投递 {} 个岗位", jobsToApply.size());
+        for (int i = 0; i < jobsToApply.size(); i++) {
+            JobListing j = jobsToApply.get(i);
+            log.info("[成员7]   待投递#{}: {} @ {} | jobId={}", i + 1, j.getTitle(), j.getCompany(), j.getJobId());
+        }
+
+        // Step3: 获取用户简历
+        UserProfile profile = resumeParser.getProfile(userId);
+        if (profile == null) {
+            return "❌ 请先提供简历信息（如发送简历文字或文件）";
+        }
+
+        // Step4: 批量投递
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("📋 开始投递 %d 个岗位...\n\n", jobsToApply.size()));
+
+        int successCount = 0;
+        int failCount = 0;
+        for (int i = 0; i < jobsToApply.size(); i++) {
+            JobListing job = jobsToApply.get(i);
+            try {
+                ApplicationResult result = applicationClient.apply(job, profile);
+                result.setMatchScore(0); // 从搜索结果投递不做评分
+
+                if (result.isSuccess()) {
+                    result.setAppliedAt(LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+                    applicationTracker.record(result, userId);
+                    successCount++;
+                    sb.append(String.format("✅ %d. %s @ %s\n", i + 1, job.getTitle(), job.getCompany()));
+                } else {
+                    failCount++;
+                    String msg = result.getMessage() != null ? result.getMessage() : "投递失败";
+                    sb.append(String.format("❌ %d. %s @ %s - %s\n", i + 1, job.getTitle(), job.getCompany(), msg));
+                }
+            } catch (Exception e) {
+                failCount++;
+                sb.append(String.format("❌ %d. %s @ %s - %s\n", i + 1, job.getTitle(), job.getCompany(), e.getMessage()));
+            }
+        }
+
+        sb.append(String.format("\n📊 投递完成：成功 %d 个，失败 %d 个", successCount, failCount));
+
+        log.info("[成员7] applyFromSearch 完成 | 成功={} | 失败={}", successCount, failCount);
+        return sb.toString();
+    }
+
+    // ═══════════════════════════════════════════════════
+    // 方法5: 查询投递进度
     // ═══════════════════════════════════════════════════
     @Override
     public String getApplicationProgress(String userId) {

@@ -91,6 +91,17 @@ public interface ResumeOrchestrator {
     String getApplicationProgress(String userId);
 
     // ═══════════════════════════════════════════════════
+    // 方法5: 从搜索结果中投递指定岗位
+    // ═══════════════════════════════════════════════════
+    /**
+     * 用户搜索岗位后，从搜索结果中选择指定岗位进行投递。
+     *
+     * 【被谁调用】ResumeTool.applyFromSearch() → LLM Function Calling
+     * 【返回值】  投递结果汇总文本
+     */
+    String applyFromSearch(String userId, List<Integer> indices, Integer count);
+
+    // ═══════════════════════════════════════════════════
     // 内部辅助方法
     // ═══════════════════════════════════════════════════
 
