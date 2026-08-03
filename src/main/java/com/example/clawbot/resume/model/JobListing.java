@@ -41,4 +41,6 @@ public class JobListing {
     private String publishDate;
     /** 是否已投递 */
     private boolean applied;
+    /** 岗位类型（猎聘：6=社招/校招，用于投递 API） */
+    private String jobKind;
 }

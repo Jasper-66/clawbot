@@ -140,7 +140,7 @@ public class WeChatBotService {
                 log.info("══════════ [思考] 收到文本消息 ══════════");
                 log.info("  发信人: {}", fromUser);
                 log.info("  内容: \"{}\"", preview);
-                log.info("  → 按优先级匹配关键词: 音色命令 → TTS请求 → 图片生成 → 兜底LLM对话");
+                log.info("  → 按优先级匹配关键词: 音色命令 → TTS请求 → 图片生成 → 岗位搜索 → 提醒 → 兜底LLM对话");
 
                 try {
                     if (isVoiceCommand(text)) {
@@ -152,6 +152,9 @@ public class WeChatBotService {
                     } else if (isImageGenRequest(text)) {
                         log.info("[行动] 匹配到「图片生成」关键词，路由到AI绘图模块");
                         handleImageGeneration(fromUser, text);
+                    } else if (isJobSearchRequest(text)) {
+                        log.info("[行动] 匹配到「岗位搜索」关键词，强制调用 search_jobs 工具获取真实数据");
+                        handleJobSearch(fromUser, text);
                     } else if (isReminderRequest(text)) {
                         log.info("[行动] 匹配到「提醒」关键词，路由到提醒模块（LLM解析 → 调用工具）");
                         handleReminder(fromUser, text);
@@ -293,6 +296,94 @@ public class WeChatBotService {
                 .replaceAll("生成图片|生成图像|生成一张|生成个图|画一个|画一张|画个|画一只|画只|画幅|帮我画|图片生成|图像生成|做一张图|做个图|来一张|来张|生成|图片|图像|照片|图", "")
                 .trim();
         return prompt.isEmpty() ? text : prompt;
+    }
+
+    // ═══════════════════════════════════════════════════
+    // 岗位搜索功能：代码级关键词检测，强制调用真实搜索
+    // ═══════════════════════════════════════════════════
+    static boolean isJobSearchRequest(String text) {
+        if (text == null || text.isBlank()) return false;
+        String lower = text.toLowerCase();
+        // 排除投递相关的关键词（这些应该走apply_from_search）
+        if (lower.contains("投第") || lower.contains("投递第") || lower.contains("投前")
+                || lower.contains("就投") || lower.contains("投这些") || lower.contains("投这几个")
+                || lower.contains("投递") && (lower.contains("个") || lower.contains("列表"))) {
+            return false;
+        }
+        // 搜索关键词匹配
+        return (lower.contains("找") || lower.contains("搜") || lower.contains("查") || lower.contains("看看")
+                || lower.contains("有什么") || lower.contains("有没有") || lower.contains("推荐"))
+                && (lower.contains("工作") || lower.contains("岗位") || lower.contains("职位")
+                || lower.contains("招聘") || lower.contains("job"));
+    }
+
+    private void handleJobSearch(String fromUser, String text) {
+        log.info("[行动] 岗位搜索模块: 用户消息 \"{}\"，直接调用 search_jobs 获取真实数据", text);
+        try {
+            // 从用户消息中提取关键词和城市
+            String keyword = extractJobKeyword(text);
+            String city = extractJobCity(text);
+            log.info("[行动] 岗位搜索: 提取到 keyword={}, city={}", keyword, city);
+
+            if (keyword.isEmpty()) {
+                keyword = "Java开发";
+                log.info("[行动] 岗位搜索: 未提取到关键词，使用默认 {}", keyword);
+            }
+            if (city.isEmpty()) {
+                city = "全国";
+                log.info("[行动] 岗位搜索: 未提取到城市，使用默认 {}", city);
+            }
+
+            // 直接调用 orchestrator.searchJobs，不走 LLM，确保真实数据+缓存更新
+            String result = resumeOrchestrator.searchJobs(fromUser, keyword, city);
+            sendReply(fromUser, result);
+            log.info("[最终结果] 岗位搜索结果已发送 ({}字符)", result.length());
+        } catch (Exception e) {
+            log.error("[异常] 岗位搜索失败 | 用户: {} | 内容: \"{}\" | 原因: {}", fromUser, text, e.getMessage(), e);
+            sendReply(fromUser, "抱歉，岗位搜索失败，请稍后再试。");
+        }
+    }
+
+    private String extractJobKeyword(String text) {
+        String cleaned = text
+                .replaceAll("(帮我|我想|我要|请|麻烦|看看|搜一下|查一下|找一下|搜索|查找|推荐|有没有|有什么|的|岗位|职位|工作|招聘|在|地区|地方|城市)", "")
+                .trim();
+        // 如果清理后太短，返回原文本中的核心词汇
+        if (cleaned.length() < 2) {
+            // 尝试从原文本中提取可能的岗位关键词
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("(Java|java|后端|前端|AI|产品|测试|运维|架构|算法|数据|开发|工程师)")
+                    .matcher(text);
+            if (m.find()) {
+                return m.group(1) + "开发";
+            }
+            return "";
+        }
+        // 去掉城市名称，返回剩余的关键词
+        String[] cities = {"北京", "上海", "广州", "深圳", "杭州", "成都", "武汉", "南京", "西安", "苏州", "天津", "重庆",
+                "河南", "河北", "山东", "山西", "湖南", "湖北", "广东", "广西", "江苏", "浙江", "安徽", "福建", "江西", "辽宁", "吉林", "黑龙江",
+                "海南", "四川", "贵州", "云南", "陕西", "甘肃", "青海", "台湾", "内蒙古", "新疆", "西藏", "宁夏", "香港", "澳门",
+                "雄安", "全国"};
+        for (String city : cities) {
+            cleaned = cleaned.replace(city, "");
+        }
+        cleaned = cleaned.trim();
+        return cleaned.isEmpty() ? "" : cleaned;
+    }
+
+    private String extractJobCity(String text) {
+        String[] cities = {"北京", "上海", "广州", "深圳", "杭州", "成都", "武汉", "南京", "西安", "苏州", "天津", "重庆",
+                "河南", "河北", "山东", "山西", "湖南", "湖北", "广东", "广西", "江苏", "浙江", "安徽", "福建", "江西", "辽宁", "吉林", "黑龙江",
+                "海南", "四川", "贵州", "云南", "陕西", "甘肃", "青海", "台湾", "内蒙古", "新疆", "西藏", "宁夏", "香港", "澳门",
+                "雄安新区", "雄安", "全国各城", "全国"};
+        for (String city : cities) {
+            if (text.contains(city)) {
+                if ("全国各城".equals(city)) return "";
+                if ("雄安新区".equals(city)) return "雄安";
+                return city;
+            }
+        }
+        return "";
     }
 
     // ═══════════════════════════════════════════════════

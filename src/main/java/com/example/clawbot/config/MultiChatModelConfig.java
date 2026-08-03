@@ -31,8 +31,7 @@ public class MultiChatModelConfig {
                 .requestFactory(new JdkClientHttpRequestFactory(httpClient));
     }
 
-    /** DeepSeek ChatModel — 主模型，用于对话和 Tool Calling */
-    @Primary
+    /** DeepSeek ChatModel — 备用模型（余额不足时可手动切换） */
     @Bean("deepSeekChatModel")
     public OpenAiChatModel deepSeekChatModel(
             @Value("${deepseek.api.key}") String apiKey,
@@ -52,7 +51,8 @@ public class MultiChatModelConfig {
                 .build();
     }
 
-    /** DashScope ChatModel — Vision 模型，用于图片识别 */
+    /** DashScope ChatModel — 主模型，用于对话和 Tool Calling（有免费额度） */
+    @Primary
     @Bean("dashScopeChatModel")
     public OpenAiChatModel dashScopeChatModel(
             @Value("${vision.api.key}") String apiKey,

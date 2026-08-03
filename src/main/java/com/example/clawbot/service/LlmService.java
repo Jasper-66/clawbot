@@ -122,7 +122,7 @@ public class LlmService {
         String messagePreview = userMessage.length() > 100
                 ? userMessage.substring(0, 100) + "..."
                 : userMessage;
-        log.info("[行动] 向 DeepSeek API 发送对话请求 (model={})", chatClient != null ? "deepseek-v4-flash" : "unknown");
+        log.info("[行动] 向大模型 API 发送对话请求");
         log.info("  请求内容: system提示词 + Function Calling工具定义 + 对话历史 + 用户消息 \"{}\"", messagePreview);
 
         // ① 获取或创建会话ID
@@ -170,6 +170,18 @@ public class LlmService {
             return reply != null ? reply.trim() : "抱歉，我没有生成有效回复，请稍后再试。";
         } catch (Exception e) {
             log.error("ChatClient 调用失败", e);
+            String errMsg = e.getMessage() != null ? e.getMessage() : "";
+            if (errMsg.contains("Insufficient Balance") || errMsg.contains("402")) {
+                return "抱歉，大模型服务余额不足，请稍后再试或联系管理员。";
+            } else if (errMsg.contains("Invalid Authentication") || errMsg.contains("401") || errMsg.contains("invalid_api_key")) {
+                return "抱歉，大模型服务配置错误（API Key 无效），请稍后再试。";
+            } else if (errMsg.contains("timeout") || errMsg.contains("timed out") || errMsg.contains("Read timed out")) {
+                return "抱歉，大模型服务响应超时，请 30 秒后再试。";
+            } else if (errMsg.contains("header parser received no bytes") || errMsg.contains("EOFException") || errMsg.contains("ResourceAccessException")) {
+                return "抱歉，大模型服务连接中断（可能是网络波动或服务繁忙），请 30 秒后再试。";
+            } else if (errMsg.contains("rate limit") || errMsg.contains("429") || errMsg.contains("too many requests")) {
+                return "抱歉，请求过于频繁，请 30 秒后再试。";
+            }
             return "抱歉，我暂时无法处理，请稍后再试。";
         }
     }

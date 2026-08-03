@@ -35,6 +35,12 @@ public class ResumePlatformConfig {
     /** 浏览器是否无头模式（true=不显示浏览器窗口） */
     private boolean browserHeadless = false;
 
+    /** 猎聘 Token（MCP API 认证） */
+    private String liepinToken;
+
+    /** 猎聘 Cookie（网页 API 认证） */
+    private String liepinCookie;
+
     // getters / setters
     public String getProvider() { return provider; }
     public void setProvider(String provider) { this.provider = provider; }
@@ -54,4 +60,8 @@ public class ResumePlatformConfig {
     public void setMaxApplyInterval(int maxApplyInterval) { this.maxApplyInterval = maxApplyInterval; }
     public boolean isBrowserHeadless() { return browserHeadless; }
     public void setBrowserHeadless(boolean browserHeadless) { this.browserHeadless = browserHeadless; }
+    public String getLiepinToken() { return liepinToken; }
+    public void setLiepinToken(String liepinToken) { this.liepinToken = liepinToken; }
+    public String getLiepinCookie() { return liepinCookie; }
+    public void setLiepinCookie(String liepinCookie) { this.liepinCookie = liepinCookie; }
 }

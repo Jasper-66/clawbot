@@ -27,4 +27,8 @@ public class ApplicationResult {
     private Integer matchScore;
     /** 简历优化建议（AI生成的针对该岗位的简历调整建议） */
     private String optimizationTip;
+    /** 投递方式: MCP_API / COOKIE_API / MOCK（模拟） */
+    private String deliveryMethod;
+    /** 是否真实投递成功（Mock模式为false） */
+    private boolean realSuccess;
 }
