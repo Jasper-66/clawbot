@@ -5,24 +5,33 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.modelcontextprotocol.client.McpSyncClient;
 import io.modelcontextprotocol.spec.McpSchema;
-import lombok.RequiredArgsConstructor;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 通过标准 MCP 协议调用猎聘工具。
  */
 @Service
-@RequiredArgsConstructor
 @ConditionalOnProperty(name = "resume.platform.provider", havingValue = "liepin")
 public class LiepinMcpClientService {
 
     private final List<McpSyncClient> mcpClients;
     private final ObjectMapper objectMapper;
+    private final Map<String, McpSyncClient> toolClients = new ConcurrentHashMap<>();
+
+    public LiepinMcpClientService(
+            @Qualifier("mcpSyncClients") List<McpSyncClient> mcpClients,
+            ObjectMapper objectMapper
+    ) {
+        this.mcpClients = mcpClients;
+        this.objectMapper = objectMapper;
+    }
 
     public JsonNode searchJobs(Map<String, Object> arguments) {
         return callTool("user-search-job", arguments);
@@ -50,13 +59,12 @@ public class LiepinMcpClientService {
     }
 
     private McpSyncClient findClient(String toolName) {
-        return mcpClients.stream()
+        return toolClients.computeIfAbsent(toolName, name -> mcpClients.stream()
                 .filter(client -> client.listTools().tools().stream()
-                        .anyMatch(tool -> toolName.equals(tool.name())))
+                        .anyMatch(tool -> name.equals(tool.name())))
                 .findFirst()
                 .orElseThrow(() -> new IllegalStateException(
-                        "猎聘 MCP Server 未提供工具: " + toolName
-                ));
+                        "猎聘 MCP Server 未提供工具: " + name)));
     }
 
     private JsonNode toJson(McpSchema.CallToolResult result) {

@@ -17,12 +17,10 @@ public class ApplicationResult {
     private JobListing jobListing;
     /** 平台返回的投递ID */
     private String applicationId;
-    /** 投递状态: SUBMITTED / VIEWED / INTERVIEW / REJECTED */
+    /** SUBMITTED / FAILED / UNKNOWN */
     private String status;
     /** 平台返回的消息 */
     private String message;
     /** 投递时间 */
     private String appliedAt;
-    /** 匹配评分（0~100） */
-    private Integer matchScore;
 }

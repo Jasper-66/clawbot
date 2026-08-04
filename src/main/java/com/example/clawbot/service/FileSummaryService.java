@@ -67,7 +67,8 @@ public class FileSummaryService {
         return summary;
     }
 
-    private String extractText(byte[] fileBytes, String fileName) {
+    /** 提取文件中的纯文本，供摘要和简历分析复用。 */
+    public String extractText(byte[] fileBytes, String fileName) {
         String lower = fileName != null ? fileName.toLowerCase() : "";
 
         try {

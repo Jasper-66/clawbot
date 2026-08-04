@@ -119,11 +119,9 @@ public class LlmService {
                     + "【重要规则-提醒】当用户要求设置提醒、定时提醒时，你必须调用 create_reminder 或 create_periodic_reminder 工具。"
                     + "绝对不要自己编造'已设置成功'的回复，只有工具返回 success=true 才算设置成功。"
                     + "如果用户没有提供明确时间，先询问用户。\n"
-                    + "【重要规则-求职】查询岗位时必须调用本地 search_jobs，查询简历时调用 my-resume。"
-                    + "用户说“投1号”“投1和3号”或“全部投递”时，必须将用户这句话原样传给 "
-                    + "prepare_job_application，使用最近一次 search_jobs 的岗位结果生成待确认清单，不能直接投递。"
-                    + "只有用户在看到待确认信息后明确回复“确认投递”，才能调用 confirm_job_application；确认工具只需传当前用户ID。"
-                    + "批量投递也必须先展示完整待确认清单并获得一次明确确认，不得自行确认或编造投递成功结果。";
+                    + "【重要规则-求职】查询岗位时必须调用本地 search_jobs；只有查询猎聘账号中的在线简历时才调用 my-resume。"
+                    + "用户说“投1号”“投1和3号”或“全部投递”时，必须将用户这句话原样传给 apply_jobs，"
+                    + "使用最近一次 search_jobs 的岗位结果立即投递。只能根据工具真实返回结果回复，不得编造投递成功。";
 
     public String chat(String userId, String userMessage) {
         long startTime = System.currentTimeMillis();
@@ -150,8 +148,9 @@ public class LlmService {
 
             // ③ 使用 Fluent API，Advisor 自动管记忆
             var chatResponse = chatClient.prompt()
-                    .system(buildSystemPrompt(userId, ragContext))
+                    .system(buildSystemPrompt(ragContext))
                     .user(userMessage)
+                    .toolContext(Map.of("userId", userId))
                     .advisors(a -> a.param(
                             ChatMemory.CONVERSATION_ID,
                             conversationId
@@ -186,11 +185,10 @@ public class LlmService {
         }
     }
 
-    private String buildSystemPrompt(String userId, String ragContext) {
+    private String buildSystemPrompt(String ragContext) {
         String currentTime = OffsetDateTime.now(DEFAULT_ZONE).toString();
         String prompt = SYSTEM_PROMPT
                 + " 当前时间是 " + currentTime + "，当前时区是 Asia/Shanghai。"
-                + " 当前用户ID是 " + userId + "，调用需要 user_id 参数的工具时请传入此值。"
                 + " 创建提醒时必须把用户表达的时间转换为带时区的 ISO 8601 格式；"
                 + "如果用户没有提供明确时间，应先询问用户。";
 

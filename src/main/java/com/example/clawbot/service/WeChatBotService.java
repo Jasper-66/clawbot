@@ -1,8 +1,5 @@
 package com.example.clawbot.service;
 
-import com.example.clawbot.resume.model.UserProfile;
-import com.example.clawbot.resume.service.ResumeOrchestrator;
-import com.example.clawbot.resume.service.ResumeParser;
 import com.github.wechat.ilink.sdk.ILinkClient;
 import com.github.wechat.ilink.sdk.core.config.ILinkConfig;
 import com.github.wechat.ilink.sdk.core.model.FileItem;
@@ -12,7 +9,6 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -37,11 +33,6 @@ public class WeChatBotService {
     private final FileSummaryService fileSummaryService;
     private final ReminderService reminderService;
     private final com.example.clawbot.tool.ReminderTool reminderTool;
-
-    @Lazy
-    private final ResumeParser resumeParser;
-    @Lazy
-    private final ResumeOrchestrator resumeOrchestrator;
 
     private ILinkClient client;
 
@@ -189,7 +180,7 @@ public class WeChatBotService {
                 FileItem fileItem = item.getFile_item();
                 log.info("══════════ [思考] 收到文件消息: {} ══════════", fileItem.getFile_name());
                 log.info("  发信人: {}", fromUser);
-                log.info("  → 需要: 下载文件 → 提取文本(PDF/DOCX/XLSX等) → LLM生成摘要");
+                log.info("  → 需要: 下载文件 → 提取文本 → 根据文件类型处理");
                 handleFileMessage(fromUser, item, fileItem);
             }
         });
@@ -428,14 +419,13 @@ public class WeChatBotService {
     }
 
     /**
-     * 判断是否是简历文件（PDF/Word格式，且文件名可能包含"简历"、"resume"等关键词）
+     * 判断是否是简历文件（PDF/DOCX，且文件名包含简历特征）。
      */
     private boolean isResumeFile(String fileName) {
         if (fileName == null) return false;
         String lower = fileName.toLowerCase();
 
-        // 检查文件格式：支持PDF和Word
-        boolean isSupportedFormat = lower.endsWith(".pdf") || lower.endsWith(".docx") || lower.endsWith(".doc");
+        boolean isSupportedFormat = lower.endsWith(".pdf") || lower.endsWith(".docx");
 
         // 检查文件名是否包含简历相关关键词
         boolean hasResumeKeyword = lower.contains("简历") || lower.contains("resume") || lower.contains("cv")
@@ -457,60 +447,43 @@ public class WeChatBotService {
                 && fileName.length() < 50; // 文件名不会太长
     }
 
-    /**
-     * 处理简历文件：下载 → 解析 → 保存 → 通知用户
-     */
+    /** 下载简历原文，让模型直接分析并推荐真实岗位。 */
     private void handleResumeFile(String fromUser, MessageItem item, String fileName) {
         try {
-            client.sendTextWithTyping(fromUser, "正在解析简历，请稍候...", 500);
+            client.sendTextWithTyping(fromUser, "正在阅读简历并查找相关岗位，请稍候...", 500);
 
-            // 下载文件
             byte[] fileBytes = client.downloadFileFromMessageItem(item);
             log.info("  ├─ 简历文件下载完成 ({} bytes)", fileBytes.length);
 
-            // 调用ResumeParser解析简历
-            UserProfile profile = resumeParser.parseFromFile(fromUser, fileBytes, fileName);
-            log.info("  ├─ [观察] 简历解析完成: 姓名={}, 期望职位={}, 期望城市={}",
-                    profile.getName(), profile.getDesiredPosition(), profile.getDesiredCity());
+            String resumeText = fileSummaryService.extractText(fileBytes, fileName);
+            if (resumeText == null || resumeText.isBlank()
+                    || resumeText.startsWith("不支持的文件格式")
+                    || resumeText.startsWith("文件解析失败")) {
+                throw new IllegalArgumentException("未能从简历中提取有效文字");
+            }
 
-            // 构建成功回复
-            StringBuilder reply = new StringBuilder();
-            reply.append("✅ 简历解析成功！\n\n");
-            reply.append("📋 简历信息：\n");
-            if (profile.getName() != null && !profile.getName().isEmpty()) {
-                reply.append("• 姓名: ").append(profile.getName()).append("\n");
+            int maxLength = 8_000;
+            if (resumeText.length() > maxLength) {
+                resumeText = resumeText.substring(0, maxLength);
             }
-            if (profile.getDesiredPosition() != null && !profile.getDesiredPosition().isEmpty()) {
-                reply.append("• 期望职位: ").append(profile.getDesiredPosition()).append("\n");
-            }
-            if (profile.getDesiredCity() != null && !profile.getDesiredCity().isEmpty()) {
-                reply.append("• 期望城市: ").append(profile.getDesiredCity()).append("\n");
-            }
-            if (profile.getSalaryRange() != null && !profile.getSalaryRange().isEmpty()) {
-                reply.append("• 期望薪资: ").append(profile.getSalaryRange()).append("\n");
-            }
-            if (profile.getExperienceYears() != null && profile.getExperienceYears() > 0) {
-                reply.append("• 工作经验: ").append(profile.getExperienceYears()).append("年\n");
-            }
-            if (profile.getEducation() != null && !profile.getEducation().isEmpty()) {
-                reply.append("• 学历: ").append(profile.getEducation()).append("\n");
-            }
-            if (profile.getSkills() != null && !profile.getSkills().isEmpty()) {
-                reply.append("• 技能: ").append(String.join(", ", profile.getSkills())).append("\n");
-            }
-            reply.append("\n💡 您可以说：\n");
-            reply.append("• 「帮我找工作」— 搜索匹配岗位\n");
-            reply.append("• 「帮我投简历」— 自动投递简历\n");
-            reply.append("• 「查看投递进度」— 查看投递记录");
+            String prompt = """
+                    用户刚上传了一份简历。请直接阅读下方原文，不要转换成JSON，不要保存或声称保存了用户资料。
+                    请先简要反馈简历体现的求职方向、核心技能和经验，然后必须调用 search_jobs，
+                    使用最相关的一个岗位关键词和简历中的期望城市推荐真实岗位；简历没有城市时使用“全国”。
+                    最终回复必须包含工具返回的岗位列表，并提示用户可回复“投1号”“投1和3号”或“全部投递”。
 
-            sendReply(fromUser, reply.toString());
-            log.info("  └─ [最终结果] 简历解析结果已发送给用户");
+                    【简历原文】
+                    """ + resumeText;
+
+            String reply = llmService.chat(fromUser, prompt);
+            sendReply(fromUser, reply);
+            log.info("  └─ [最终结果] 简历分析和岗位推荐已发送给用户");
 
         } catch (Exception e) {
             log.error("[异常] 简历文件处理失败 | 文件: {} | 用户: {} | 原因: {}",
                     fileName, fromUser, e.getMessage(), e);
-            sendReply(fromUser, "抱歉，简历解析失败。请确保：\n" +
-                    "1. 文件是PDF或Word格式\n" +
+            sendReply(fromUser, "抱歉，简历读取失败。请确保：\n" +
+                    "1. 文件是PDF或DOCX格式\n" +
                     "2. 文件内容清晰可读\n" +
                     "3. 文件未损坏\n\n" +
                     "请重新发送简历文件，或直接告诉我您的求职意向。");

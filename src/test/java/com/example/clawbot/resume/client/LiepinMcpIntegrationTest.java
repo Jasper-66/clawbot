@@ -1,10 +1,7 @@
 package com.example.clawbot.resume.client;
 
-import com.example.clawbot.resume.client.impl.LiepinApplicationClient;
-import com.example.clawbot.resume.client.impl.LiepinJobSearchClient;
 import com.example.clawbot.resume.model.ApplicationResult;
 import com.example.clawbot.resume.model.JobListing;
-import com.example.clawbot.resume.repository.ApplicationRecordRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.modelcontextprotocol.client.McpSyncClient;
 import io.modelcontextprotocol.spec.McpSchema;
@@ -52,7 +49,6 @@ class LiepinMcpIntegrationTest {
     @Test
     void searchClientShouldMapLiepinJobFields() throws Exception {
         LiepinMcpClientService mcpClient = mock(LiepinMcpClientService.class);
-        ApplicationRecordRepository repository = mock(ApplicationRecordRepository.class);
         when(mcpClient.searchJobs(anyMap())).thenReturn(objectMapper.readTree("""
                 {
                   "code": 0,
@@ -74,9 +70,9 @@ class LiepinMcpIntegrationTest {
                   }
                 }
                 """));
-        LiepinJobSearchClient client = new LiepinJobSearchClient(mcpClient, repository);
+        JobSearchClient client = new JobSearchClient(mcpClient);
 
-        List<JobListing> jobs = client.searchJobs("Java开发", "北京", "3-5年", "不限");
+        List<JobListing> jobs = client.searchJobs("Java开发", "北京");
 
         assertEquals(1, jobs.size());
         assertEquals("84541619", jobs.getFirst().getJobId());
@@ -90,7 +86,7 @@ class LiepinMcpIntegrationTest {
         when(mcpClient.applyJob("84541619", "2")).thenReturn(objectMapper.readTree("""
                 {"code":0,"data":{"applicationId":"LP-1001","message":"投递成功"}}
                 """));
-        LiepinApplicationClient client = new LiepinApplicationClient(mcpClient);
+        ApplicationClient client = new ApplicationClient(mcpClient);
         JobListing job = JobListing.builder()
                 .jobId("84541619")
                 .jobKind("2")
@@ -99,7 +95,7 @@ class LiepinMcpIntegrationTest {
                 .company("示例公司")
                 .build();
 
-        ApplicationResult result = client.apply(job, null);
+        ApplicationResult result = client.apply(job);
 
         assertTrue(result.isSuccess());
         assertEquals("LP-1001", result.getApplicationId());
@@ -112,14 +108,14 @@ class LiepinMcpIntegrationTest {
         when(mcpClient.applyJob("84541619", "2")).thenReturn(objectMapper.readTree("""
                 {"code":40001,"message":"该职位暂不可投递"}
                 """));
-        LiepinApplicationClient client = new LiepinApplicationClient(mcpClient);
+        ApplicationClient client = new ApplicationClient(mcpClient);
         JobListing job = JobListing.builder()
                 .jobId("84541619")
                 .jobKind("2")
                 .platform("liepin")
                 .build();
 
-        ApplicationResult result = client.apply(job, null);
+        ApplicationResult result = client.apply(job);
 
         assertFalse(result.isSuccess());
         assertEquals("FAILED", result.getStatus());
@@ -132,14 +128,14 @@ class LiepinMcpIntegrationTest {
         when(mcpClient.applyJob("84541619", "2")).thenReturn(objectMapper.readTree("""
                 {"result":{"ok":true,"applyId":"LP-2002","msg":"申请成功"}}
                 """));
-        LiepinApplicationClient client = new LiepinApplicationClient(mcpClient);
+        ApplicationClient client = new ApplicationClient(mcpClient);
         JobListing job = JobListing.builder()
                 .jobId("84541619")
                 .jobKind("2")
                 .platform("liepin")
                 .build();
 
-        ApplicationResult result = client.apply(job, null);
+        ApplicationResult result = client.apply(job);
 
         assertTrue(result.isSuccess());
         assertEquals("LP-2002", result.getApplicationId());
@@ -152,14 +148,14 @@ class LiepinMcpIntegrationTest {
         when(mcpClient.applyJob("84541619", "2")).thenReturn(objectMapper.readTree("""
                 {"result":{"success":false,"errorMessage":"简历信息不完整"}}
                 """));
-        LiepinApplicationClient client = new LiepinApplicationClient(mcpClient);
+        ApplicationClient client = new ApplicationClient(mcpClient);
         JobListing job = JobListing.builder()
                 .jobId("84541619")
                 .jobKind("2")
                 .platform("liepin")
                 .build();
 
-        ApplicationResult result = client.apply(job, null);
+        ApplicationResult result = client.apply(job);
 
         assertFalse(result.isSuccess());
         assertEquals("简历信息不完整", result.getMessage());
@@ -171,14 +167,14 @@ class LiepinMcpIntegrationTest {
         when(mcpClient.applyJob("84280139", "2")).thenReturn(objectMapper.readTree("""
                 {"data":{"result":"应聘成功"},"errCode":0}
                 """));
-        LiepinApplicationClient client = new LiepinApplicationClient(mcpClient);
+        ApplicationClient client = new ApplicationClient(mcpClient);
         JobListing job = JobListing.builder()
                 .jobId("84280139")
                 .jobKind("2")
                 .platform("liepin")
                 .build();
 
-        ApplicationResult result = client.apply(job, null);
+        ApplicationResult result = client.apply(job);
 
         assertTrue(result.isSuccess());
         assertEquals("应聘成功", result.getMessage());
@@ -191,17 +187,32 @@ class LiepinMcpIntegrationTest {
         when(mcpClient.applyJob("84280139", "2")).thenReturn(objectMapper.readTree("""
                 {"data":{"result":"您的简历完整度不足65%，请先完善简历"},"errCode":0}
                 """));
-        LiepinApplicationClient client = new LiepinApplicationClient(mcpClient);
+        ApplicationClient client = new ApplicationClient(mcpClient);
         JobListing job = JobListing.builder()
                 .jobId("84280139")
                 .jobKind("2")
                 .platform("liepin")
                 .build();
 
-        ApplicationResult result = client.apply(job, null);
+        ApplicationResult result = client.apply(job);
 
         assertFalse(result.isSuccess());
         assertEquals("您的简历完整度不足65%，请先完善简历", result.getMessage());
+        assertEquals("FAILED", result.getStatus());
+    }
+
+    @Test
+    void transportSuccessWithoutApplicationProofShouldNotCountAsSuccess() throws Exception {
+        LiepinMcpClientService mcpClient = mock(LiepinMcpClientService.class);
+        when(mcpClient.applyJob("84280139", "2")).thenReturn(objectMapper.readTree("""
+                {"code":0,"data":{}}
+                """));
+        ApplicationClient client = new ApplicationClient(mcpClient);
+        JobListing job = JobListing.builder().jobId("84280139").jobKind("2").build();
+
+        ApplicationResult result = client.apply(job);
+
+        assertFalse(result.isSuccess());
         assertEquals("FAILED", result.getStatus());
     }
 

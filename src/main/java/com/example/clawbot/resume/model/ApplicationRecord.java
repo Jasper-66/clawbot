@@ -5,7 +5,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
-// 投递记录（持久化存储，用于统计和追踪）
+// SQLite 中的一次岗位投递记录。
 @Data
 @Builder
 @NoArgsConstructor
@@ -29,10 +29,8 @@ public class ApplicationRecord {
     private String salary;
     /** 工作城市 */
     private String city;
-    /** 投递状态: SUBMITTED / VIEWED / INTERVIEW / REJECTED / OFFER */
+    /** PROCESSING / SUBMITTED / FAILED / UNKNOWN */
     private String status;
-    /** 匹配评分 */
-    private Integer matchScore;
     /** 投递时间 */
     private String appliedAt;
     /** 最后更新时间 */
