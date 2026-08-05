@@ -15,12 +15,12 @@ mvn spring-boot:run
 cd clawbot-ui && npm install && npm run dev
 ```
 
-Use `JAVA_HOME=C:/Users/30287/.jdks/ms-21.0.12` for CLI builds on this machine.
+Use `JAVA_HOME=D:/jdk21` for CLI builds on this machine.
 
 ## Environment
 
 - **JDK**: JDK 21 (Microsoft OpenJDK `ms-21.0.12`)
-- **Maven**: 3.9.11
+- **Maven**: 3.9.15
 - **Spring Boot**: 3.3.5
 - **Spring AI**: 1.0.0-M6 (OpenAI starter for DeepSeek/DashScope compatibility)
 

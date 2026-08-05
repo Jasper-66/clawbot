@@ -137,9 +137,23 @@ public class ResumeTool {
     /**
      * 格式化投递结果为微信可读文本。
      */
-    private String formatApplyResult(ApplicationResult result) {
+    public static String formatApplyResult(ApplicationResult result) {
         if (result == null) {
             return "❌ 投递失败，无返回结果";
+        }
+
+        boolean isMock = !result.isRealSuccess() && result.getDeliveryMethod() != null
+                && "MOCK".equals(result.getDeliveryMethod());
+
+        StringBuilder sb = new StringBuilder();
+        if (result.getResumeSummary() != null && !result.getResumeSummary().isBlank()) {
+            sb.append(result.getResumeSummary()).append("\n\n");
+        }
+
+        // 待确认模式：尚未投递，message 为候选岗位列表，直接展示给用户选择
+        if (!result.isSuccess() && !isMock && result.getMessage() != null && !result.getMessage().isBlank()) {
+            sb.append(result.getMessage());
+            return sb.toString();
         }
 
         String jobTitle = result.getJobListing() != null ? result.getJobListing().getTitle() : "未知岗位";
@@ -148,10 +162,6 @@ public class ResumeTool {
         String city = result.getJobListing() != null ? result.getJobListing().getCity() : "";
         int matchScore = result.getMatchScore();
 
-        boolean isMock = !result.isRealSuccess() && result.getDeliveryMethod() != null
-                && "MOCK".equals(result.getDeliveryMethod());
-
-        StringBuilder sb = new StringBuilder();
         if (result.isSuccess() && !isMock) {
             sb.append("✅ 投递成功！\n");
         } else if (isMock) {

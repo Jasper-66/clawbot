@@ -28,7 +28,8 @@ import java.util.*;
 @Service
 @RequiredArgsConstructor
 @ConditionalOnProperty(name = "resume.platform.provider", havingValue = "liepin")
-public class LiepinApplicationClient implements ApplicationClient {
+public class
+LiepinApplicationClient implements ApplicationClient {
 
     private final RestTemplate restTemplate;
     private final ResumePlatformConfig config;

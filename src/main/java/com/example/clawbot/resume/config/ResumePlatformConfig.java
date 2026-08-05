@@ -18,7 +18,7 @@ public class ResumePlatformConfig {
     private String apiKey;
 
     /** 默认城市 */
-    private String defaultCity = "北京";
+    private String defaultCity = "杭州";
 
     /** 最低匹配分（0~100），低于此分的岗位不投递 */
     private int minMatchScore = 60;

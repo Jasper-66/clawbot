@@ -140,7 +140,7 @@ public class WeChatBotService {
                 log.info("══════════ [思考] 收到文本消息 ══════════");
                 log.info("  发信人: {}", fromUser);
                 log.info("  内容: \"{}\"", preview);
-                log.info("  → 按优先级匹配关键词: 音色命令 → TTS请求 → 图片生成 → 岗位搜索 → 提醒 → 兜底LLM对话");
+                log.info("  → 按优先级匹配关键词: 音色命令 → TTS请求 → 图片生成 → 岗位搜索 → 自动投递 → 提醒 → 兜底LLM对话");
 
                 try {
                     if (isVoiceCommand(text)) {
@@ -155,11 +155,14 @@ public class WeChatBotService {
                     } else if (isJobSearchRequest(text)) {
                         log.info("[行动] 匹配到「岗位搜索」关键词，强制调用 search_jobs 工具获取真实数据");
                         handleJobSearch(fromUser, text);
+                    } else if (isAutoApplyRequest(text)) {
+                        log.info("[行动] 匹配到「自动投递」关键词，直接调用 auto_apply 流程");
+                        handleAutoApply(fromUser, text);
                     } else if (isReminderRequest(text)) {
                         log.info("[行动] 匹配到「提醒」关键词，路由到提醒模块（LLM解析 → 调用工具）");
                         handleReminder(fromUser, text);
                     } else {
-                        log.info("[行动] 未命中特殊关键词，作为通用对话路由到 LLM 服务 (DeepSeek Function Calling)");
+                        log.info("[行动] 未命中特殊关键词，作为通用对话路由到 LLM 服务 (DashScope Function Calling)");
                         String reply = llmService.chat(fromUser, text);
                         handleLlmReply(fromUser, reply);
                     }
@@ -315,6 +318,45 @@ public class WeChatBotService {
                 || lower.contains("有什么") || lower.contains("有没有") || lower.contains("推荐"))
                 && (lower.contains("工作") || lower.contains("岗位") || lower.contains("职位")
                 || lower.contains("招聘") || lower.contains("job"));
+    }
+
+    /**
+     * 检测用户是否表达了「自动投递」意图（代码级关键词，不依赖 LLM 判断）。
+     * 命中后直接走 auto_apply 全流程，确保「帮我投简历」这类请求可靠触发。
+     */
+    static boolean isAutoApplyRequest(String text) {
+        if (text == null || text.isBlank()) return false;
+        String lower = text.toLowerCase();
+        // 排除「从搜索结果投第N个」类指令（那些走 apply_from_search）
+        if (lower.contains("投第") || lower.contains("投前") || lower.contains("投这几个")
+                || lower.contains("投这些") || lower.contains("投列表")) {
+            return false;
+        }
+        return lower.contains("帮我投简历")
+                || lower.contains("帮我投")
+                || lower.contains("自动投递")
+                || lower.contains("自动投简历")
+                || lower.contains("投一下简历")
+                || (lower.contains("投简历") && !lower.contains("投简历给"));
+    }
+
+    /**
+     * 处理自动投递请求：直接调用 resumeOrchestrator.autoApply，不走 LLM 工具调用。
+     */
+    private void handleAutoApply(String fromUser, String text) {
+        log.info("[行动] 自动投递模块: 用户消息 \"{}\"，直接调用 auto_apply 全流程", text);
+        try {
+            // 先发送"正在筛选"提示，再执行耗时流程
+            client.sendTextWithTyping(fromUser, "正在为你筛选匹配岗位，请稍候...", 500);
+            com.example.clawbot.resume.model.ApplicationResult result =
+                    resumeOrchestrator.autoApply(fromUser, text);
+            String reply = com.example.clawbot.resume.tool.ResumeTool.formatApplyResult(result);
+            sendReply(fromUser, reply);
+            log.info("[最终结果] auto_apply 返回: success={}", result != null && result.isSuccess());
+        } catch (Exception e) {
+            log.error("[异常] 自动投递失败 | 用户: {} | 原因: {}", fromUser, e.getMessage(), e);
+            sendReply(fromUser, "抱歉，自动投递失败，请稍后再试。");
+        }
     }
 
     private void handleJobSearch(String fromUser, String text) {
@@ -770,7 +812,7 @@ public class WeChatBotService {
         }
     }
 
-    @Scheduled(fixedDelayString = "${reminder.check-interval-ms:10000}")
+    @Scheduled(fixedDelayString = "${reminder.check-interval-ms:120000}")
     public void sendDueReminders() {
         if (!running || !loggedIn || client == null) {
             log.warn("[定时扫描] 跳过: running={}, loggedIn={}, client={}", running, loggedIn, client != null);

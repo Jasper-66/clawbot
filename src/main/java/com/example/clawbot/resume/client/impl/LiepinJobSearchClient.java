@@ -57,6 +57,9 @@ public class LiepinJobSearchClient implements JobSearchClient {
             return Collections.emptyList();
         }
 
+        // 城市归一化：猎聘简历里的城市常带区县（如"杭州-余杭区"），搜索时归一成市名
+        city = normalizeCity(city);
+
         log.info("[猎聘] 发起岗位搜索: keyword={}, city={}, experience={}, salary={}",
                 keyword, city, experience, salaryRange);
 
@@ -448,6 +451,27 @@ public class LiepinJobSearchClient implements JobSearchClient {
             }
         }
         return null;
+    }
+
+    /**
+     * 城市归一化：猎聘简历里的城市常带区县（如"杭州-余杭区"、"北京"、"全国"），
+     * 搜索时只取市级名，保证能匹配到 cityCodeMap 中的城市代码。
+     */
+    private String normalizeCity(String city) {
+        if (city == null || city.isBlank()) return city;
+        String c = city.trim();
+        // 去掉形如"杭州-余杭区"中的区县部分，只保留市级名
+        if (c.contains("-") && !"全国".equals(c)) {
+            c = c.substring(0, c.indexOf('-'));
+        }
+        // 去掉常见后缀，如"杭州市" → "杭州"
+        for (String suffix : new String[]{"市", "地区", "自治州"}) {
+            if (c.endsWith(suffix)) {
+                c = c.substring(0, c.length() - suffix.length());
+                break;
+            }
+        }
+        return c;
     }
 
     /**

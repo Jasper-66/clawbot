@@ -52,6 +52,20 @@ public interface ResumeParser {
     UserProfile parseFromImage(String userId, byte[] imageBytes, String fileName);
 
     /**
+     * 从纯文本简历（如猎聘 MCP 拉取的真实简历）中提取并解析简历内容。
+     *
+     * 【被谁调用】ResumeOrchestrator.autoApply() 拉取猎聘简历后调用
+     * 【返回值】  UserProfile（包含完整的简历信息）
+     *
+     * 【实现流程】
+     *   1. 构建提示词：要求 LLM 从简历文本中提取所有字段
+     *   2. 解析 LLM 返回的 JSON → UserProfile
+     *   3. 将原始简历文本保存到 UserProfile.rawResumeText
+     *   4. 返回 UserProfile
+     */
+    UserProfile parseFromText(String userId, String resumeText);
+
+    /**
      * 保存/更新用户简历到数据库。
      *
      * 【被谁调用】简历解析完成后，由 ResumeOrchestrator 调用

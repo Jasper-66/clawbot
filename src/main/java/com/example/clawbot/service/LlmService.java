@@ -37,7 +37,7 @@ import java.util.Map;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 
-// LLM 对话与图片识别服务，封装 DeepSeek Chat（文本）和 DashScope（视觉）的 API 调用
+// LLM 对话与图片识别服务，封装 DashScope（对话+视觉，主模型）和 DeepSeek（备用）的 API 调用
 @Slf4j
 @Service
 public class LlmService {
@@ -160,7 +160,7 @@ public class LlmService {
                     int promptTokens = usage.getPromptTokens() != null ? usage.getPromptTokens() : 0;
                     int completionTokens = usage.getCompletionTokens() != null ? usage.getCompletionTokens() : 0;
                     int totalTokens = usage.getTotalTokens() != null ? usage.getTotalTokens() : (promptTokens + completionTokens);
-                    tokenUsageRepository.record(conversationId, promptTokens, completionTokens, totalTokens, "deepseek");
+                    tokenUsageRepository.record(conversationId, promptTokens, completionTokens, totalTokens, visionModel);
                     log.info("[Token] prompt={}, completion={}, total={}", promptTokens, completionTokens, totalTokens);
                 }
             } catch (Exception e) {
@@ -205,7 +205,7 @@ public class LlmService {
 
     public String chatWithImage(String userId, byte[] imageBytes, String fileName) {
         long startTime = System.currentTimeMillis();
-        log.info("[行动] 调用 DashScope 视觉模型 (model=qwen3.7-plus): 上传图片 ({} bytes) 并请求内容描述", imageBytes.length);
+        log.info("[行动] 调用 DashScope 视觉模型 (model={}): 上传图片 ({} bytes) 并请求内容描述", visionModel, imageBytes.length);
 
         String conversationId = conversationRepository.getOrCreate(userId, "[发送了一张图片]");
 

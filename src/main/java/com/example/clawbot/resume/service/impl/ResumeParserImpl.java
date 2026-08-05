@@ -221,7 +221,16 @@ public class ResumeParserImpl implements ResumeParser {
                - 常见说法：教育背景、学历、毕业院校、教育经历
                - 标准值："小学"、"初中"、"高中"、"中专"、"大专"、"本科"、"硕士"、"博士"
                - "研究生"统一填"硕士"，"MBA"填"硕士"
-            
+
+            8.5 school（学校名称）：毕业/在读的院校全称
+                - 常见说法：学校、院校、毕业院校、就读院校、学校全称
+                - 示例："北京大学"、"河南师范大学"
+
+            8.6 school_tier（学校层次）：根据学校综合评定
+                - 标准值："985"、"211"、"双一流"、"一本"、"二本"、"三本"、"大专"、"海外名校"、"海外普通"、"其他"
+                - 判定参考：985/211/双一流按官方名单；双非普通本科填"一本"或"二本"；海外名校参考QS前100
+                - 拿不准就填"其他"，不要猜
+
             9. skills（技能列表）：掌握的技术、工具、语言、能力
                - 常见说法：专业技能、技能特长、掌握技能、技术栈、工具、语言能力
                - 每个技能一个短标签
@@ -264,6 +273,7 @@ public class ResumeParserImpl implements ResumeParser {
                - 数组字段填 []（空数组）
             3. work_history 和 project_history 没有就填空数组 []
             4. salary_range 没写就填""，绝对不要填"0k-0k"
+            5. school 和 school_tier 字段必须输出（school 填学校全称，没有就填""；school_tier 按学校层次判定，没有就填"其他"）
             
             【示例1：信息齐全的简历】
             简历文本："张三  13800138000  zhangsan@email.com
@@ -275,7 +285,7 @@ public class ResumeParserImpl implements ResumeParser {
             2021.06-至今  字节跳动  Java开发工程师  负责内容推荐系统后台开发
             2019.07-2021.05  百度  Java开发  参与搜索平台接口开发
             项目经验：
-            2022.01-2022.06  推荐系统重构项目  后端开发  使用Flink重构实时推荐流，性能提升30%
+            2022.01-2022.06  推荐系统重构项目  后端开发  使用Flink重构实时推荐流，性能提升30%%
             自我评价：3年Java开发经验，熟悉互联网后端技术栈，具备高并发系统开发能力。"
             
             正确输出：
@@ -288,6 +298,8 @@ public class ResumeParserImpl implements ResumeParser {
               "salary_range": "20k-30k",
               "experience_years": 3,
               "education": "本科",
+              "school": "北京大学",
+              "school_tier": "985",
               "skills": ["Java", "Spring Boot", "MySQL", "Redis", "Git"],
               "summary": "3年Java开发经验，熟悉互联网后端技术栈，具备高并发系统开发能力。",
               "work_history": [
@@ -295,7 +307,7 @@ public class ResumeParserImpl implements ResumeParser {
                 "2019.07-2021.05  百度  Java开发  参与搜索平台接口开发"
               ],
               "project_history": [
-                "2022.01-2022.06  推荐系统重构项目  后端开发  使用Flink重构实时推荐流，性能提升30%"
+                "2022.01-2022.06  推荐系统重构项目  后端开发  使用Flink重构实时推荐流，性能提升30%%"
               ]
             }
             
@@ -355,30 +367,7 @@ public class ResumeParserImpl implements ResumeParser {
         if (resumeText == null || resumeText.isBlank()) {
             throw new IllegalArgumentException("无法从文件中提取文本内容：" + fileName);
         }
-
-        if (resumeText.length() > MAX_RESUME_TEXT_LENGTH) {
-            log.info("[观察] 简历文本过长已截断: original={}, truncated={}",
-                    resumeText.length(), MAX_RESUME_TEXT_LENGTH);
-            resumeText = resumeText.substring(0, MAX_RESUME_TEXT_LENGTH);
-        }
-           //给大模型的提示词
-        String prompt = String.format(FILE_PARSE_PROMPT, resumeText);
-        log.info("[调试] parseFromFile prompt (前200字): {}",
-                prompt.length() > 200 ? prompt.substring(0, 200) + "..." : prompt);
-          //调用llm
-        String response = llmService.chat(userId, prompt);
-        log.info("[调试] parseFromFile LLM response: {}", response);
-         //解析JSON数据
-        UserProfile profile = parseJsonToProfile(response, userId);
-         //保留原始简历文本
-        profile.setRawResumeText(resumeText);
-
-        profile = applyDefaults(profile);
-        profile = saveProfile(profile);
-
-        log.info("[观察] 文件解析完成: userId={}, name={}, desiredPosition={}",
-                profile.getUserId(), profile.getName(), profile.getDesiredPosition());
-        return profile;
+        return parseResumeText(userId, resumeText, "文件");
     }
 
     @Override
@@ -394,29 +383,48 @@ public class ResumeParserImpl implements ResumeParser {
         }
 
         log.info("[观察] 图片文字提取完成: textLength={} chars", resumeText.length());
+        return parseResumeText(userId, resumeText, "图片");
+    }
 
+    @Override
+    public UserProfile parseFromText(String userId, String resumeText) {
+        log.info("[行动] 从文本简历解析: userId={}, textLength={} chars",
+                userId, resumeText != null ? resumeText.length() : 0);
+        if (resumeText == null || resumeText.isBlank()) {
+            throw new IllegalArgumentException("简历文本为空");
+        }
+        return parseResumeText(userId, resumeText, "文本");
+    }
+
+    /**
+     * 简历文本解析公共流程：截断 → LLM提取结构化JSON → 保存原始文本 → 补默认值 → 入库。
+     */
+    private UserProfile parseResumeText(String userId, String resumeText, String source) {
         if (resumeText.length() > MAX_RESUME_TEXT_LENGTH) {
             log.info("[观察] 简历文本过长已截断: original={}, truncated={}",
                     resumeText.length(), MAX_RESUME_TEXT_LENGTH);
             resumeText = resumeText.substring(0, MAX_RESUME_TEXT_LENGTH);
         }
 
-        // 第2步：和文件解析走同样的流程 — 用文本LLM解析结构化JSON
+        // 给大模型的提示词
         String prompt = String.format(FILE_PARSE_PROMPT, resumeText);
-        log.info("[调试] parseFromImage prompt (前200字): {}",
-                prompt.length() > 200 ? prompt.substring(0, 200) + "..." : prompt);
+        log.info("[调试] parseFrom{} prompt (前200字): {}",
+                source, prompt.length() > 200 ? prompt.substring(0, 200) + "..." : prompt);
 
+        // 调用 LLM
         String response = llmService.chat(userId, prompt);
-        log.info("[调试] parseFromImage LLM response: {}", response);
+        log.info("[调试] parseFrom{} LLM response: {}", source, response);
 
+        // 解析 JSON 数据
         UserProfile profile = parseJsonToProfile(response, userId);
+        // 保留原始简历文本
         profile.setRawResumeText(resumeText);
 
         profile = applyDefaults(profile);
         profile = saveProfile(profile);
 
-        log.info("[观察] 图片解析完成: userId={}, name={}, desiredPosition={}",
-                profile.getUserId(), profile.getName(), profile.getDesiredPosition());
+        log.info("[观察] {}解析完成: userId={}, name={}, desiredPosition={}",
+                source, profile.getUserId(), profile.getName(), profile.getDesiredPosition());
         return profile;
     }
 
@@ -518,9 +526,10 @@ public class ResumeParserImpl implements ResumeParser {
             jdbcTemplate.update("""
                     INSERT INTO user_profiles (
                         user_id, name, phone, email, desired_position, desired_city,
-                        salary_range, experience_years, education, skills, summary,
-                        raw_resume_text, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        salary_range, experience_years, education, school, school_tier,
+                        skills, summary, work_history, project_history, raw_resume_text,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     profile.getUserId(),
                     profile.getName(),
@@ -531,8 +540,12 @@ public class ResumeParserImpl implements ResumeParser {
                     profile.getSalaryRange(),
                     profile.getExperienceYears(),
                     profile.getEducation(),
+                    profile.getSchool(),
+                    profile.getSchoolTier(),
                     toJson(profile.getSkills()),
                     profile.getSummary(),
+                    toJson(profile.getWorkHistory()),
+                    toJson(profile.getProjectHistory()),
                     profile.getRawResumeText(),
                     now, now
             );
@@ -542,8 +555,9 @@ public class ResumeParserImpl implements ResumeParser {
                     UPDATE user_profiles SET
                         name = ?, phone = ?, email = ?, desired_position = ?,
                         desired_city = ?, salary_range = ?, experience_years = ?,
-                        education = ?, skills = ?, summary = ?, raw_resume_text = ?,
-                        updated_at = ?
+                        education = ?, school = ?, school_tier = ?,
+                        skills = ?, summary = ?, work_history = ?, project_history = ?,
+                        raw_resume_text = ?, updated_at = ?
                     WHERE user_id = ?
                     """,
                     profile.getName(),
@@ -554,8 +568,12 @@ public class ResumeParserImpl implements ResumeParser {
                     profile.getSalaryRange(),
                     profile.getExperienceYears(),
                     profile.getEducation(),
+                    profile.getSchool(),
+                    profile.getSchoolTier(),
                     toJson(profile.getSkills()),
                     profile.getSummary(),
+                    toJson(profile.getWorkHistory()),
+                    toJson(profile.getProjectHistory()),
                     profile.getRawResumeText(),
                     now,
                     profile.getUserId()
@@ -590,8 +608,12 @@ public class ResumeParserImpl implements ResumeParser {
                 .experienceYears(row.get("experience_years") != null
                         ? ((Number) row.get("experience_years")).intValue() : null)
                 .education((String) row.get("education"))
+                .school((String) row.get("school"))
+                .schoolTier((String) row.get("school_tier"))
                 .skills(parseSkillsJson((String) row.get("skills")))
                 .summary((String) row.get("summary"))
+                .workHistory(parseSkillsJson((String) row.get("work_history")))
+                .projectHistory(parseSkillsJson((String) row.get("project_history")))
                 .rawResumeText((String) row.get("raw_resume_text"))
                 .build();
     }
@@ -677,6 +699,8 @@ public class ResumeParserImpl implements ResumeParser {
                     .salaryRange(root.path("salary_range").asText(""))
                     .experienceYears(root.path("experience_years").asInt(0))
                     .education(root.path("education").asText(""))
+                    .school(root.path("school").asText(""))
+                    .schoolTier(root.path("school_tier").asText(""))
                     .skills(skills)
                     .summary(root.path("summary").asText(""))
                     .workHistory(workHistory)
@@ -719,6 +743,8 @@ public class ResumeParserImpl implements ResumeParser {
         if (profile.getDesiredPosition() == null) profile.setDesiredPosition("");
         if (profile.getSalaryRange() == null) profile.setSalaryRange("");
         if (profile.getEducation() == null) profile.setEducation("");
+        if (profile.getSchool() == null) profile.setSchool("");
+        if (profile.getSchoolTier() == null) profile.setSchoolTier("其他");
         if (profile.getSummary() == null) profile.setSummary("");
         if (profile.getWorkHistory() == null) profile.setWorkHistory(new ArrayList<>());
         if (profile.getProjectHistory() == null) profile.setProjectHistory(new ArrayList<>());
