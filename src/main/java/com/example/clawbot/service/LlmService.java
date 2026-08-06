@@ -10,7 +10,7 @@ import com.example.clawbot.tool.SearchNearbyTool;
 import com.example.clawbot.tool.TarotTool;
 import com.example.clawbot.tool.TextToSpeechTool;
 import com.example.clawbot.tool.WeatherTool;
-import com.example.clawbot.resume.tool.ResumeTool;
+import com.example.clawbot.liepin.tool.LiepinJobTool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -70,7 +70,7 @@ public class LlmService {
                       TextToSpeechTool textToSpeechTool,
                       ReminderTool reminderTool,
                       TarotTool tarotTool,
-                      ResumeTool resumeTool) {
+                      LiepinJobTool liepinJobTool) {
         this.restTemplate = restTemplate;
         this.conversationRepository = conversationRepository;
         this.messageRepository = messageRepository;
@@ -84,7 +84,7 @@ public class LlmService {
                         textToSpeechTool,
                         reminderTool,
                         tarotTool,
-                        resumeTool
+                        liepinJobTool
                 )
                 //关键：配置记忆顾问（秘书）
                 .defaultAdvisors(
@@ -108,7 +108,13 @@ public class LlmService {
                     + "如果用户没有要求语音，不要主动调用 text_to_speech 工具。\n"
                     + "【重要规则-提醒】当用户要求设置提醒、定时提醒时，你必须调用 create_reminder 或 create_periodic_reminder 工具。"
                     + "绝对不要自己编造'已设置成功'的回复，只有工具返回 success=true 才算设置成功。"
-                    + "如果用户没有提供明确时间，先询问用户。";
+                    + "如果用户没有提供明确时间，先询问用户。\n"
+                    + "【重要规则-猎聘求职】当用户提到找工作、求职、搜索岗位、投递简历、投递记录时，你必须调用猎聘相关工具：\n"
+                    + "- 搜索岗位：调用 search_liepin_jobs 工具，传入关键词和城市\n"
+                    + "- 投递单个岗位：调用 apply_liepin_job 工具，传入职位ID和jobKind（必须从搜索结果中获取）\n"
+                    + "- 批量投递：调用 batch_apply_liepin 工具\n"
+                    + "- 查看投递记录：调用 get_liepin_applications 工具\n"
+                    + "绝对不要自己编造职位信息，必须通过工具获取真实数据。";
 
     public String chat(String userId, String userMessage) {
         long startTime = System.currentTimeMillis();

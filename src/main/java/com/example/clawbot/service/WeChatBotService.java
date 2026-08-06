@@ -1,5 +1,8 @@
 package com.example.clawbot.service;
 
+import com.example.clawbot.liepin.model.LiepinJob;
+import com.example.clawbot.liepin.service.LiepinJobService;
+import com.example.clawbot.liepin.tool.LiepinJobTool;
 import com.github.wechat.ilink.sdk.ILinkClient;
 import com.github.wechat.ilink.sdk.core.config.ILinkConfig;
 import com.github.wechat.ilink.sdk.core.model.FileItem;
@@ -13,10 +16,13 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 // 微信机器人核心服务：登录、消息轮询、类型路由、回复发送的中枢
 @Slf4j
@@ -33,6 +39,8 @@ public class WeChatBotService {
     private final FileSummaryService fileSummaryService;
     private final ReminderService reminderService;
     private final com.example.clawbot.tool.ReminderTool reminderTool;
+    private final LiepinJobTool liepinJobTool;
+    private final LiepinJobService liepinJobService;
 
     private ILinkClient client;
 
@@ -40,6 +48,9 @@ public class WeChatBotService {
     private volatile boolean loggedIn = false;
 
     private final Set<Long> processedMsgIds = ConcurrentHashMap.newKeySet();
+    
+    // 用户搜索结果缓存：用户ID → 搜索结果列表
+    private final java.util.Map<String, List<LiepinJob>> userSearchCache = new ConcurrentHashMap<>();
 
     @PostConstruct
     public void init() {
@@ -134,7 +145,11 @@ public class WeChatBotService {
                 log.info("  → 按优先级匹配关键词: 音色命令 → TTS请求 → 图片生成 → 兜底LLM对话");
 
                 try {
-                    if (isVoiceCommand(text)) {
+                    // 帮助检测
+                    if (isHelpRequest(text)) {
+                        log.info("[行动] 匹配到「帮助」关键词，显示使用指南");
+                        sendLiepinHelp(fromUser);
+                    } else if (isVoiceCommand(text)) {
                         log.info("[行动] 匹配到「音色命令」关键词，路由到语音管理模块");
                         handleVoiceCommand(fromUser, text);
                     } else if (isTtsRequest(text)) {
@@ -146,10 +161,37 @@ public class WeChatBotService {
                     } else if (isReminderRequest(text)) {
                         log.info("[行动] 匹配到「提醒」关键词，路由到提醒模块（LLM解析 → 调用工具）");
                         handleReminder(fromUser, text);
+                    } else if (isLiepinSearchRequest(text)) {
+                        log.info("[行动] 匹配到「猎聘搜索」关键词，直接调用猎聘API");
+                        handleLiepinSearch(fromUser, text);
+                    } else if (isLiepinApplyRequest(text)) {
+                        log.info("[行动] 匹配到「猎聘投递」关键词，直接调用猎聘API");
+                        handleLiepinApply(fromUser, text);
+                    } else if (isLiepinBatchApplyRequest(text)) {
+                        log.info("[行动] 匹配到「猎聘批量投递」关键词，直接调用猎聘API");
+                        handleLiepinBatchApply(fromUser);
+                    } else if (isLiepinHistoryRequest(text)) {
+                        log.info("[行动] 匹配到「猎聘投递记录」关键词，直接调用猎聘API");
+                        handleLiepinHistory(fromUser);
                     } else {
-                        log.info("[行动] 未命中特殊关键词，作为通用对话路由到 LLM 服务 (DeepSeek Function Calling)");
-                        String reply = llmService.chat(fromUser, text);
-                        handleLlmReply(fromUser, reply);
+                        // 混合模式：LLM意图分类
+                        log.info("[行动] 关键词未匹配，调用LLM意图分类");
+                        String intent = classifyIntentWithLLM(text);
+                        
+                        if ("job_search".equals(intent)) {
+                            log.info("[猎聘] LLM识别意图：搜索岗位");
+                            handleLiepinSearch(fromUser, text);
+                        } else if ("job_apply".equals(intent)) {
+                            log.info("[猎聘] LLM识别意图：投递简历");
+                            handleLiepinApply(fromUser, text);
+                        } else if ("job_history".equals(intent)) {
+                            log.info("[猎聘] LLM识别意图：查看记录");
+                            handleLiepinHistory(fromUser);
+                        } else {
+                            log.info("[行动] LLM识别意图：普通对话");
+                            String reply = llmService.chat(fromUser, text);
+                            handleLlmReply(fromUser, reply);
+                        }
                     }
                 } catch (Exception e) {
                     log.error("[异常] 文本消息处理失败 | 用户: {} | 内容: \"{}\" | 原因: {} | 建议: 检查 LLM 服务和网络连接", fromUser, preview, e.getMessage(), e);
@@ -339,6 +381,316 @@ public class WeChatBotService {
         }
     }
 
+    // ═══════════════════════════════════════════════════
+    // 猎聘求职功能：直接调用猎聘API，不依赖LLM工具调用
+    // ═══════════════════════════════════════════════════
+    
+    // 检测帮助请求
+    private boolean isHelpRequest(String text) {
+        if (text == null || text.isBlank()) return false;
+        return text.contains("帮助") || text.contains("help") || text.contains("怎么用") 
+            || text.contains("使用说明") || text.contains("使用指南");
+    }
+    
+    // 检测猎聘搜索请求（扩展关键词）
+    private boolean isLiepinSearchRequest(String text) {
+        if (text == null || text.isBlank()) return false;
+        // 扩展匹配关键词
+        return (text.contains("搜索") || text.contains("查询") || text.contains("查找") || text.contains("找"))
+                && (text.contains("岗位") || text.contains("职位") || text.contains("工作") 
+                    || text.contains("销售") || text.contains("开发") || text.contains("经理")
+                    || text.contains("工程师") || text.contains("设计") || text.contains("运营"));
+    }
+    
+    // 检测猎聘投递请求（单个）
+    private boolean isLiepinApplyRequest(String text) {
+        if (text == null || text.isBlank()) return false;
+        // 匹配 "投递 123456" 或 "投递123456" 等模式
+        Pattern pattern = Pattern.compile("投递\\s*(\\d+)");
+        return pattern.matcher(text).find();
+    }
+    
+    // 检测猎聘批量投递请求
+    private boolean isLiepinBatchApplyRequest(String text) {
+        if (text == null || text.isBlank()) return false;
+        return text.contains("全部投递") || text.contains("批量投递");
+    }
+    
+    // 检测猎聘投递记录查询
+    private boolean isLiepinHistoryRequest(String text) {
+        if (text == null || text.isBlank()) return false;
+        return text.contains("投递记录") || text.contains("查看投递") || text.contains("投递进度");
+    }
+    
+    // 处理猎聘搜索请求（支持智能搜索）
+    private void handleLiepinSearch(String fromUser, String text) {
+        log.info("[猎聘] 处理搜索请求: {}", text);
+        try {
+            client.sendTextWithTyping(fromUser, "正在分析你的需求...", 500);
+            
+            // 用LLM解析自然语言，提取搜索参数
+            java.util.Map<String, Object> searchParams = parseSearchRequestWithLLM(text);
+            
+            log.info("[猎聘] LLM解析结果: {}", searchParams);
+            
+            // 调用猎聘API（支持完整参数）
+            List<LiepinJob> jobs = liepinJobService.searchJobsWithParams(searchParams);
+            
+            if (jobs.isEmpty()) {
+                sendReply(fromUser, "未找到符合条件的职位，请尝试其他关键词或城市。");
+                return;
+            }
+            
+            // 缓存搜索结果
+            userSearchCache.put(fromUser, jobs);
+            
+            // 构建回复（使用短索引）
+            StringBuilder sb = new StringBuilder();
+            sb.append("为你找到以下").append(jobs.size()).append("个职位：\n\n");
+            
+            for (int i = 0; i < jobs.size(); i++) {
+                LiepinJob job = jobs.get(i);
+                sb.append(i + 1).append(". ").append(job.getTitle());  // 使用短索引 1, 2, 3...
+                if (job.getCompany() != null && !job.getCompany().isEmpty()) {
+                    sb.append(" | ").append(job.getCompany());
+                }
+                if (job.getCity() != null && !job.getCity().isEmpty()) {
+                    sb.append(" | ").append(job.getCity());
+                }
+                if (job.getSalary() != null && !job.getSalary().isEmpty()) {
+                    sb.append(" | ").append(job.getSalary());
+                }
+                sb.append("\n");
+                if (job.getExperience() != null && !job.getExperience().isEmpty()) {
+                    sb.append("   经验: ").append(job.getExperience());
+                }
+                if (job.getEducation() != null && !job.getEducation().isEmpty()) {
+                    sb.append(" | 学历: ").append(job.getEducation());
+                }
+                sb.append("\n\n");
+            }
+            
+            sb.append("投递请发送：投递 序号\n");
+            sb.append("例如：投递 1\n");
+            sb.append("批量投递：全部投递");
+            
+            sendReply(fromUser, sb.toString());
+            log.info("[猎聘] 搜索完成，返回{}个职位，已缓存", jobs.size());
+            
+        } catch (Exception e) {
+            log.error("[猎聘] 搜索失败: {}", e.getMessage(), e);
+            sendReply(fromUser, "搜索失败: " + e.getMessage());
+        }
+    }
+    
+    // 用LLM解析自然语言搜索请求
+    private java.util.Map<String, Object> parseSearchRequestWithLLM(String userMessage) {
+        String prompt = """
+            请从用户消息中提取搜索参数，返回JSON格式：
+            {
+              "address": "城市名（仅限国内城市，如北京、上海、深圳、广州）",
+              "jobName": "职位关键词",
+              "workExperience": "工作经验（如3-5年、3年以上）",
+              "eduLevel": "学历（如本科、硕士、博士）",
+              "salaryFloor": "薪资下限数字（如20000）",
+              "salaryCap": "薪资上限数字（如50000）",
+              "salaryKind": "薪资类型（月薪或年薪）",
+              "compNature": "公司性质（国企、外企、民营）",
+              "companyName": "公司名称"
+            }
+            
+            注意：
+            1. 只返回JSON，不要其他内容。没有的字段不要包含。
+            2. 国外城市（如东京、新加坡、纽约、伦敦、首尔等）不要放在address里，而是放在jobName里（如"东京 销售"）。
+            3. 国内城市放在address里。
+            用户消息: "%s"
+            """.formatted(userMessage);
+        
+        try {
+            String result = llmService.chat("search_parser", prompt).trim();
+            log.info("[猎聘] LLM解析原始结果: {}", result);
+            
+            // 提取JSON（可能被```json```包裹）
+            if (result.contains("{")) {
+                result = result.substring(result.indexOf("{"), result.lastIndexOf("}") + 1);
+            }
+            
+            // 解析JSON
+            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            java.util.Map<String, Object> params = mapper.readValue(result, java.util.Map.class);
+            
+            // 清理空值
+            params.values().removeIf(v -> v == null || v.toString().isEmpty());
+            
+            return params;
+        } catch (Exception e) {
+            log.error("[猎聘] LLM解析失败，使用简单提取: {}", e.getMessage());
+            // 降级：简单提取
+            java.util.Map<String, Object> fallback = new java.util.HashMap<>();
+            fallback.put("jobName", extractKeyword(userMessage));
+            String city = extractCitySimple(userMessage);
+            if (!city.isEmpty()) {
+                fallback.put("address", city);
+            }
+            return fallback;
+        }
+    }
+    
+    // 简单城市提取（降级方案）
+    private String extractCitySimple(String text) {
+        String[] commonCities = {"北京", "上海", "广州", "深圳", "杭州", "南京", "成都", "武汉", "重庆", "天津", "东京", "新加坡", "纽约", "伦敦", "首尔"};
+        for (String city : commonCities) {
+            if (text.contains(city)) {
+                return city;
+            }
+        }
+        return "";
+    }
+    
+    // 处理猎聘单个投递请求（支持短索引）
+    private void handleLiepinApply(String fromUser, String text) {
+        log.info("[猎聘] 处理投递请求: {}", text);
+        try {
+            // 提取序号
+            Pattern pattern = Pattern.compile("投递\\s*(\\d+)");
+            Matcher matcher = pattern.matcher(text);
+            if (!matcher.find()) {
+                sendReply(fromUser, "请指定序号，例如：投递 1");
+                return;
+            }
+            
+            int index = Integer.parseInt(matcher.group(1)) - 1;
+            List<LiepinJob> recentJobs = userSearchCache.get(fromUser);
+            
+            if (recentJobs == null || index < 0 || index >= recentJobs.size()) {
+                sendReply(fromUser, "序号无效，请先搜索职位后再投递。\n\n例如：搜索南京的销售岗位");
+                return;
+            }
+            
+            LiepinJob job = recentJobs.get(index);
+            client.sendTextWithTyping(fromUser, "正在投递简历...", 500);
+            
+            // 使用真实的 jobId 和 jobKind 调用API
+            var result = liepinJobService.applyJob(job.getJobId(), job.getJobKind());
+            
+            if (result.isSuccess()) {
+                sendReply(fromUser, "✅ 投递成功！\n" + job.getTitle() + " | " + job.getCompany() + "\n状态: 已投递\n\n可在猎聘APP查看投递记录");
+            } else {
+                sendReply(fromUser, "❌ 投递失败\n" + job.getTitle() + " | " + job.getCompany() + "\n原因: " + result.getMessage());
+            }
+            
+        } catch (Exception e) {
+            log.error("[猎聘] 投递失败: {}", e.getMessage(), e);
+            sendReply(fromUser, "投递失败: " + e.getMessage());
+        }
+    }
+    
+    // 处理猎聘批量投递请求
+    private void handleLiepinBatchApply(String fromUser) {
+        log.info("[猎聘] 处理批量投递请求");
+        try {
+            // 从缓存获取用户最近搜索结果
+            List<LiepinJob> recentJobs = userSearchCache.get(fromUser);
+            
+            if (recentJobs == null || recentJobs.isEmpty()) {
+                sendReply(fromUser, "请先搜索职位，然后再批量投递。\n\n例如：搜索南京的销售岗位");
+                return;
+            }
+            
+            client.sendTextWithTyping(fromUser, "正在批量投递" + recentJobs.size() + "个职位...", 500);
+            
+            int successCount = 0;
+            int failCount = 0;
+            StringBuilder result = new StringBuilder();
+            result.append("批量投递结果：\n\n");
+            
+            for (LiepinJob job : recentJobs) {
+                try {
+                    var applyResult = liepinJobService.applyJob(job.getJobId(), job.getJobKind());
+                    if (applyResult.isSuccess()) {
+                        successCount++;
+                        result.append("✅ ").append(job.getTitle()).append(" | ").append(job.getCompany()).append("\n");
+                    } else {
+                        failCount++;
+                        result.append("❌ ").append(job.getTitle()).append(" | ").append(applyResult.getMessage()).append("\n");
+                    }
+                    // 避免触发限流
+                    Thread.sleep(1000);
+                } catch (Exception e) {
+                    failCount++;
+                    result.append("❌ ").append(job.getTitle()).append(" | 失败\n");
+                }
+            }
+            
+            result.append("\n📊 成功: ").append(successCount).append(" | 失败: ").append(failCount);
+            sendReply(fromUser, result.toString());
+            
+        } catch (Exception e) {
+            log.error("[猎聘] 批量投递失败: {}", e.getMessage(), e);
+            sendReply(fromUser, "批量投递失败: " + e.getMessage());
+        }
+    }
+    
+    // 处理猎聘投递记录查询
+    private void handleLiepinHistory(String fromUser) {
+        log.info("[猎聘] 处理投递记录查询");
+        try {
+            var applications = liepinJobService.getApplicationHistory();
+            
+            if (applications.isEmpty()) {
+                sendReply(fromUser, "暂无投递记录");
+                return;
+            }
+            
+            StringBuilder sb = new StringBuilder();
+            sb.append("投递记录（共").append(applications.size()).append("条）：\n\n");
+            
+            for (var app : applications) {
+                sb.append("• 职位ID: ").append(app.getJobId());
+                sb.append(" | 状态: ").append(app.getStatus());
+                sb.append(" | 时间: ").append(app.getAppliedAt());
+                if (app.getErrorMessage() != null && !app.getErrorMessage().isEmpty()) {
+                    sb.append("\n  失败原因: ").append(app.getErrorMessage());
+                }
+                sb.append("\n");
+            }
+            
+            sendReply(fromUser, sb.toString());
+            
+        } catch (Exception e) {
+            log.error("[猎聘] 查询投递记录失败: {}", e.getMessage(), e);
+            sendReply(fromUser, "查询失败: " + e.getMessage());
+        }
+    }
+    
+    // 从文本中提取城市
+    private String extractCity(String text) {
+        // 扩展城市列表（包含主要城市）
+        String[] cities = {
+            "北京", "上海", "广州", "深圳", "杭州", "南京", "成都", "武汉", "西安", "重庆", 
+            "天津", "苏州", "长沙", "郑州", "青岛", "大连", "沈阳", "哈尔滨", "长春",
+            "济南", "厦门", "福州", "合肥", "昆明", "贵阳", "南昌", "太原", "石家庄",
+            "兰州", "海口", "银川", "西宁", "拉萨", "乌鲁木齐", "呼和浩特", "南宁",
+            "无锡", "常州", "宁波", "温州", "东莞", "佛山", "珠海", "中山", "惠州"
+        };
+        for (String city : cities) {
+            if (text.contains(city)) {
+                return city;
+            }
+        }
+        // 默认返回空
+        return "";
+    }
+    
+    // 从文本中提取关键词
+    private String extractKeyword(String text) {
+        // 移除城市和常见修饰词
+        String keyword = text;
+        keyword = keyword.replaceAll("搜索|查找|找|猎聘|的|岗位|职位|工作|查询", "").trim();
+        keyword = keyword.replaceAll("北京|上海|广州|深圳|杭州|南京|成都|武汉|西安|重庆|天津|苏州|长沙|郑州|青岛|大连|沈阳|哈尔滨|长春|济南|厦门|福州|合肥|昆明|贵阳|南昌|太原|石家庄|兰州|海口|银川|西宁|拉萨|乌鲁木齐|呼和浩特|南宁|无锡|常州|宁波|温州|东莞|佛山|珠海|中山|惠州", "").trim();
+        return keyword.isEmpty() ? "销售" : keyword; // 默认返回"销售"
+    }
+
     private boolean isTtsRequest(String text) {
         return text.startsWith("朗读") || text.startsWith("读一下")
                 || text.startsWith("语音说") || text.startsWith("语音播报")
@@ -404,17 +756,29 @@ public class WeChatBotService {
     }
 
     private void handleFileMessage(String fromUser, MessageItem item, FileItem fileItem) {
+        String fileName = fileItem.getFile_name();
+        log.info("══════════ [思考] 收到文件消息: {} ══════════", fileName);
+        log.info("  发信人: {}", fromUser);
+        log.info("  → 普通文件，走文件摘要流程");
+        handleNormalFile(fromUser, item, fileItem);
+    }
+
+    /**
+     * 处理普通文件：下载 → 提取文本 → LLM生成摘要
+     */
+    private void handleNormalFile(String fromUser, MessageItem item, FileItem fileItem) {
         log.info("[行动] 开始处理文件: {} → 下载 → 提取文本 → LLM生成摘要", fileItem.getFile_name());
         try {
             client.sendTextWithTyping(fromUser, "正在查看文件，请稍候...", 500);
             byte[] fileBytes = client.downloadFileFromMessageItem(item);
             log.info("  ├─ 文件下载完成 ({} bytes)", fileBytes.length);
-            //调用FileSummaryService来提取内容并生成摘要
+            // 调用FileSummaryService来提取内容并生成摘要
             String summary = fileSummaryService.summarizeFile(fileBytes, fileItem.getFile_name());
             log.info("  └─ [观察] 文件总结完成，生成摘要 ({}字符)", summary != null ? summary.length() : 0);
             sendReply(fromUser, summary);
         } catch (Exception e) {
-            log.error("[异常] 文件处理失败 | 文件: {} | 用户: {} | 原因: {} | 建议: 检查文件格式是否支持", fileItem.getFile_name(), fromUser, e.getMessage(), e);
+            log.error("[异常] 文件处理失败 | 文件: {} | 用户: {} | 原因: {} | 建议: 检查文件格式是否支持",
+                    fileItem.getFile_name(), fromUser, e.getMessage(), e);
             sendReply(fromUser, "抱歉，文件处理失败，请稍后再试。");
         }
     }
@@ -602,6 +966,68 @@ public class WeChatBotService {
         if (client != null) {
             client.close();
             log.info("ClawBot 已关闭");
+        }
+    }
+    
+    // ═══════════════════════════════════════════════════
+    // 猎聘使用指南和LLM意图分类
+    // ═══════════════════════════════════════════════════
+    
+    // 发送猎聘使用指南
+    private void sendLiepinHelp(String fromUser) {
+        String help = """
+            📋 猎聘求职助手使用指南
+            ═══════════════════════
+            
+            🔍 搜索岗位
+            • 搜索 南京的销售岗位
+            • 查询 北京Java开发
+            • 找 上海产品经理工作
+            
+            📝 投递简历
+            • 投递 1 （投递第1个岗位）
+            • 投递 3 （投递第3个岗位）
+            
+            📦 批量投递
+            • 全部投递 （投递搜索到的所有岗位）
+            
+            📊 查看记录
+            • 投递记录
+            • 查看投递
+            
+            ❓ 帮助
+            • 帮助 / help
+            
+            ⚠️ 注意事项
+            • 请先在猎聘APP完善简历
+            • 投递使用猎聘内置简历
+            • Token有效期90天
+            """;
+        sendReply(fromUser, help);
+    }
+    
+    // LLM意图分类
+    private String classifyIntentWithLLM(String userMessage) {
+        try {
+            String prompt = "请判断用户消息的意图，返回以下类别之一：\n"
+                + "- job_search: 搜索工作、找岗位、求职、找工作、想找工作、有什么工作\n"
+                + "- job_apply: 投递简历、应聘、投递某个岗位\n"
+                + "- job_history: 查看投递记录、投递进度\n"
+                + "- general: 其他普通对话\n\n"
+                + "用户消息: \"" + userMessage + "\"\n\n"
+                + "只返回类别名称（如 job_search），不要返回其他内容。";
+            
+            String result = llmService.chat("intent_classifier", prompt).trim().toLowerCase();
+            log.info("[猎聘] LLM意图分类结果: {}", result);
+            
+            // 标准化结果
+            if (result.contains("job_search") || result.contains("search")) return "job_search";
+            if (result.contains("job_apply") || result.contains("apply")) return "job_apply";
+            if (result.contains("job_history") || result.contains("history")) return "job_history";
+            return "general";
+        } catch (Exception e) {
+            log.error("[猎聘] LLM意图分类失败: {}", e.getMessage());
+            return "general";  // 失败时降级为普通对话
         }
     }
 }
